@@ -73,6 +73,10 @@ export async function proxy(request: NextRequest) {
     pathname.startsWith("/api/webhooks") ||
     pathname.startsWith("/api/health") ||
     pathname.startsWith("/api/admin") ||
+    // /api/metrics/* — intentionally public read-only aggregate metrics
+    // (e.g. follow-up-time). No per-user data; safe to serve without a
+    // session, so it must bypass the auth-redirect gate below.
+    pathname.startsWith("/api/metrics") ||
     // /api/portal/<token>/... — token in the path IS the credential; the
     // route handlers validate it via lib/portals/token.ts.
     pathname.startsWith("/api/portal/")
