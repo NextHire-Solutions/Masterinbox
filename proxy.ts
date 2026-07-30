@@ -18,6 +18,9 @@ const PORTAL_HOSTS = new Set(["portal.brokerstaffer.com"]);
 const PORTAL_ALLOWED_PREFIXES = [
   "/portal", // /portal/<token>/*
   "/api/portal", // /api/portal/<token>/*
+  "/api/metrics", // public read-only aggregate metrics (no per-user data) —
+  //               served on the portal host too so a plain public GET works
+  //               there without hitting the /portal-locked fail-close.
   "/_next", // Next.js bundle + static assets
   "/favicon", // /favicon.ico, /favicon-*
   "/portal-logo", // public portal assets
