@@ -34,7 +34,25 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import type { SessionContext } from "@/lib/auth/workspace";
-import type { ListRow } from "@/lib/inbox/lists-shared";
+import {
+  normalizeClientName,
+  type ClientStatus,
+  type ListRow,
+} from "@/lib/inbox/lists-shared";
+
+// Flat status dots — cleaner and more consistent than the 🟢/🟡/🔴 emoji,
+// which render as heavy glossy spheres. Tailwind swatches read well in both
+// light and dark themes.
+const STATUS_DOT: Record<ClientStatus, string> = {
+  active: "bg-emerald-500",
+  paused: "bg-amber-500",
+  churned: "bg-red-500",
+};
+const STATUS_LABEL: Record<ClientStatus, string> = {
+  active: "Active",
+  paused: "Paused",
+  churned: "Churned",
+};
 
 // Sidebar width is user-resizable via the drag handle on the right edge.
 // Width is persisted in localStorage so the user's preference survives reloads
@@ -80,6 +98,30 @@ export function Sidebar({
   // auto-sort would override any manual move. The list comes
   // straight from the server prop.
   const lists = initialLists;
+  // Client health (🟢 active / 🟡 paused / 🔴 churned) comes from an external
+  // feed via the /api/clients/status proxy. Fetched AFTER mount as a pure
+  // progressive enhancement — the sidebar renders fully without it, and any
+  // failure just leaves status unset. It can never block or break the inbox.
+  const [clientStatus, setClientStatus] = useState<{
+    counts: Record<ClientStatus, number> | null;
+    byName: Record<string, ClientStatus>;
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/clients/status")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d?.ok) {
+          setClientStatus({ counts: d.counts ?? null, byName: d.byName ?? {} });
+        }
+      })
+      .catch(() => {
+        // fail open — no status, sidebar unchanged.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [width, setWidth] = useState<number>(DEFAULT_WIDTH);
   const [resizing, setResizing] = useState(false);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -232,6 +274,26 @@ export function Sidebar({
           so a fresh reply bubbles its client to the top within ~250ms
           without any client-side reordering. Search just filters the
           server-sorted list in place. */}
+      {/* Client-health summary. Counts come straight from the authoritative
+          feed. Rendered only once the status fetch succeeds — absent
+          otherwise, so nothing shifts if the feed is unavailable. */}
+      {clientStatus?.counts ? (
+        <div className="px-4 pt-0.5 pb-2 shrink-0 flex items-center gap-4 text-[11px] font-medium">
+          {(["active", "paused", "churned"] as const).map((k) => (
+            <span
+              key={k}
+              className="inline-flex items-center gap-1.5"
+              title={STATUS_LABEL[k]}
+            >
+              <span className={cn("size-2 rounded-full", STATUS_DOT[k])} />
+              <span className="tabular-nums text-muted-foreground">
+                {clientStatus.counts![k]}
+              </span>
+            </span>
+          ))}
+        </div>
+      ) : null}
+
       <nav className="px-2 flex flex-col gap-px overflow-y-auto flex-1 min-h-0">
         {(listSearch.trim().length === 0
           ? lists
@@ -246,6 +308,7 @@ export function Sidebar({
               list={list}
               active={active}
               unseen={listCounts[list.id] ?? 0}
+              status={clientStatus?.byName[normalizeClientName(list.name)]}
               onEdit={() => setEditingList(list)}
               onDelete={() => setDeletingList(list)}
             />
@@ -342,12 +405,16 @@ function ListRow({
   list,
   active,
   unseen,
+  status,
   onEdit,
   onDelete,
 }: {
   list: ListRow;
   active: boolean;
   unseen: number;
+  // Client health from the external feed. undefined = not matched / feed
+  // unavailable → fall back to the list's own icon.
+  status?: ClientStatus;
   onEdit: () => void;
   onDelete: () => void;
 }) {
@@ -365,7 +432,18 @@ function ListRow({
           active && "text-foreground",
         )}
       >
-        <span className="text-base leading-none shrink-0">{list.icon ?? "📁"}</span>
+        {/* Fixed-width indicator slot so client names align whether the row
+            shows a status dot or falls back to its folder icon. */}
+        <span className="w-4 shrink-0 flex items-center justify-center">
+          {status ? (
+            <span
+              className={cn("size-2.5 rounded-full", STATUS_DOT[status])}
+              title={STATUS_LABEL[status]}
+            />
+          ) : (
+            <span className="text-base leading-none">{list.icon ?? "📁"}</span>
+          )}
+        </span>
         <span className="truncate">{list.name}</span>
         {unseen > 0 ? (
           <span className="ml-auto shrink-0 inline-flex items-center rounded-full bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white tabular-nums">

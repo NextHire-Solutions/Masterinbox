@@ -6,6 +6,7 @@ import {
   STAGE_ORDER,
   type PipelineStage,
 } from "@/lib/portals/portal-data";
+import type { StageDef } from "@/lib/portals/stage-config";
 
 // Per-client-resolved labels for the pipeline_stage enum. Provided
 // once at the top of the pipeline UI tree (see
@@ -65,4 +66,27 @@ export function VisibleStagesProvider({
 
 export function useVisibleStages(): PipelineStage[] {
   return useContext(VisibleStagesContext);
+}
+
+// Full per-client stage config (canonical + custom, ordered, colored) — present
+// ONLY for clients with the manage_stages flag (Demo). null for everyone else, so
+// deep components like StageSelector fall back to the canonical enum path.
+const StageDefsContext = createContext<StageDef[] | null>(null);
+
+export function StageDefsProvider({
+  value,
+  children,
+}: {
+  value: StageDef[] | null;
+  children: React.ReactNode;
+}) {
+  return (
+    <StageDefsContext.Provider value={value}>
+      {children}
+    </StageDefsContext.Provider>
+  );
+}
+
+export function useStageDefs(): StageDef[] | null {
+  return useContext(StageDefsContext);
 }

@@ -38,17 +38,16 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // Module scope so the TTL Map persists across requests — this endpoint is
 // public, so the cache shields the DB from repeated heavy scans. Keyed by
 // (workspaceId, from, to) via the default JSON.stringify(args).
+type CampaignRow = {
+  campaign_id: string;
+  median_seconds: number | string;
+  sample_size: number | string;
+};
+
 const loadFollowUp = ttlCache(
   async (workspaceId: string, from: string | null, to: string | null) => {
     const admin = createAdminSupabase();
-    const { data, error } = await admin.rpc("team_follow_up_by_day", {
-      p_ws: workspaceId,
-      p_from: from,
-      p_to: to,
-    });
-    if (error) throw new Error(error.message);
-    const rows = (data ?? []) as Row[];
-    const fmt = (r: Row) => {
+    const fmt = (r: { median_seconds: number | string; sample_size: number | string }) => {
       const med = Math.round(Number(r.median_seconds) || 0);
       return {
         median_seconds: med,
@@ -56,6 +55,15 @@ const loadFollowUp = ttlCache(
         sample_size: Number(r.sample_size) || 0,
       };
     };
+
+    // overall + per-day (existing RPC)
+    const { data, error } = await admin.rpc("team_follow_up_by_day", {
+      p_ws: workspaceId,
+      p_from: from,
+      p_to: to,
+    });
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as Row[];
     const overallRow = rows.find((r) => r.day === null);
     const overall = overallRow
       ? fmt(overallRow)
@@ -64,7 +72,28 @@ const loadFollowUp = ttlCache(
       .filter((r): r is Row & { day: string } => r.day !== null)
       .sort((a, b) => a.day.localeCompare(b.day))
       .map((r) => ({ date: r.day, ...fmt(r) }));
-    return { overall, days };
+
+    // per-campaign (EmailBison campaigns only — see migration 0066)
+    const { data: campData, error: campError } = await admin.rpc(
+      "team_follow_up_by_campaign",
+      { p_ws: workspaceId, p_from: from, p_to: to },
+    );
+    if (campError) throw new Error(campError.message);
+    const by_campaign = ((campData ?? []) as CampaignRow[])
+      .map((r) => ({
+        // EmailBison campaign ids are numeric — emit as an integer so the
+        // consumer can join directly (never a UUID: the RPC filters to
+        // EmailBison threads).
+        campaign_id: /^\d+$/.test(String(r.campaign_id))
+          ? Number(r.campaign_id)
+          : r.campaign_id,
+        ...fmt(r),
+      }))
+      // Busiest campaigns first; a tiny-sample row (median over < 3 replies)
+      // isn't meaningful, so the consumer shows a dash — sample_size lets them.
+      .sort((a, b) => b.sample_size - a.sample_size);
+
+    return { overall, days, by_campaign };
   },
   { ttlMs: 900_000 }, // 15 min
 );
@@ -92,7 +121,7 @@ export async function GET(request: Request) {
     );
   }
   try {
-    const { overall, days } = await loadFollowUp(workspaceId, from, to);
+    const { overall, days, by_campaign } = await loadFollowUp(workspaceId, from, to);
     return NextResponse.json({
       ok: true,
       timezone: "America/New_York",
@@ -101,6 +130,9 @@ export async function GET(request: Request) {
       to,
       overall,
       days,
+      // Per EmailBison campaign (integer campaign_id). EmailBison replies only;
+      // Instantly replies still count in overall/days but not here.
+      by_campaign,
     });
   } catch (e) {
     console.error("[follow-up-time] rpc failed", e);

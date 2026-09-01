@@ -10,6 +10,13 @@ import {
 } from "@/lib/inbox/interest";
 import { notifyIntroductionForThreads } from "@/lib/webhooks/n8n-introduction";
 import { pushIntroPipelineEntriesForThreadsToFub } from "@/lib/integrations/push-pipeline-entry";
+import { notifyPortalIntroductionForThreads } from "@/lib/webhooks/slack-portal";
+import { createAdminSupabase } from "@/lib/supabase/admin";
+import {
+  snapshotPipelineNotes,
+  restorePipelineNotes,
+  type PipelineNotesSnapshot,
+} from "@/lib/inbox/preserve-pipeline-notes";
 
 export const dynamic = "force-dynamic";
 
@@ -57,6 +64,27 @@ export async function POST(
     }
   }
 
+  // Resolve the label name up front — needed both for the Hostile /
+  // Introduction side-effects below AND to preserve pipeline notes across
+  // the relabel. When this is an Introduction (re-)tag, snapshot the
+  // thread's pipeline notes BEFORE the wipe: the zero-label window lets the
+  // 0033 trigger cascade-delete the entry (and its notes), and the
+  // re-inserted Introduction label then rebuilds a fresh, note-less entry.
+  // We copy the notes back onto the rebuilt entry after the upsert.
+  const { data: label } = await supabase
+    .from("labels")
+    .select("name")
+    .eq("id", parsed.data.label_id)
+    .maybeSingle();
+  const isIntroLabel =
+    (label?.name as string | null)?.trim().toLowerCase() === "introduction";
+  let notesSnapshot: PipelineNotesSnapshot | null = null;
+  if (isIntroLabel) {
+    notesSnapshot = await snapshotPipelineNotes(createAdminSupabase(), [
+      threadId,
+    ]);
+  }
+
   // Single-label-per-thread semantics (May 2026 client decision):
   // applying any label wipes every existing label on the thread first,
   // including AI-assigned guesses. The chip in the inbox row always
@@ -89,13 +117,8 @@ export async function POST(
     return NextResponse.json({ error: error.message }, { status: 400 });
   }
 
-  // Hostile → auto Do-Not-Contact. Look up the label name; if it's
-  // "Hostile", blacklist the lead on the source platform.
-  const { data: label } = await supabase
-    .from("labels")
-    .select("name")
-    .eq("id", parsed.data.label_id)
-    .maybeSingle();
+  // Hostile → auto Do-Not-Contact. Uses the label name resolved above; if
+  // it's "Hostile", blacklist the lead on the source platform.
   if (isHostileLabel(label?.name as string | null)) {
     await markThreadLeadDoNotContact(threadId);
   }
@@ -108,9 +131,16 @@ export async function POST(
   // The FUB push is idempotent (skips entries with fub_pushed_at
   // already set) and non-fatal (any error lands on fub_last_error,
   // never bubbles back to the labeling request).
-  if ((label?.name as string | null)?.toLowerCase() === "introduction") {
+  if (isIntroLabel) {
     after(() => notifyIntroductionForThreads([threadId], "inbox_label"));
     after(() => pushIntroPipelineEntriesForThreadsToFub([threadId]));
+    after(() => notifyPortalIntroductionForThreads([threadId]));
+    // Copy the pre-relabel notes onto the rebuilt pipeline entry (no-op if
+    // the entry survived or already carries notes).
+    if (notesSnapshot) {
+      const snap = notesSnapshot;
+      after(() => restorePipelineNotes(createAdminSupabase(), snap));
+    }
   }
 
   // Interested / Not Interested → round-trip the decision back to

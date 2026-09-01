@@ -63,7 +63,7 @@ export async function notifyPortalStageChange(args: {
       loadClientName(args.clientId),
       admin
         .from("client_pipeline_entries")
-        .select("lead_name, lead_email, thread_id, external_intro_id")
+        .select("lead_name, lead_email, thread_id, external_intro_id, source")
         .eq("id", args.entryId)
         .maybeSingle()
         .then((r) => r.data),
@@ -104,11 +104,20 @@ export async function notifyPortalStageChange(args: {
     const toLabel = readableStage(args.toStage);
 
     if (args.toStage === HIRED) {
+      // Where the agent came from. The entry's `source` is stored as
+      // "BrokerStaffer" or "Client Entry"; show the latter as "Client Side"
+      // per the client's wording. Unknown/legacy values pass through as-is;
+      // a missing source omits the line rather than guessing.
+      const rawSource = (entryRow?.source as string | null) ?? null;
+      const sourceLabel =
+        rawSource === "Client Entry" ? "Client Side" : rawSource;
+
       const lines = [
         `🎉  *Agent hired at ${clientName}!*`,
         leadEmail ? `*${leadName}*  ·  ${leadEmail}` : `*${leadName}*`,
       ];
       if (campaignName) lines.push(`   Campaign: ${campaignName}`);
+      if (sourceLabel) lines.push(`   Source: *${sourceLabel}*`);
       lines.push(`   Previously: *${fromLabel}*`);
       await postSlackMessage({
         channel: env.SLACK_CHANNEL_HIRING,
@@ -129,6 +138,62 @@ export async function notifyPortalStageChange(args: {
     });
   } catch (err) {
     console.error("[slack-portal] notifyPortalStageChange failed", err);
+  }
+}
+
+// --- New introduction (marked in MasterInbox) ---------------------------
+// Posts to the portal channel when a lead is labelled "Introduction" in
+// MasterInbox (single or bulk). Resolves the thread(s) to the intro pipeline
+// entries the label just created and posts one line per client's new agent.
+// Same contract as the rest of this file: fire-and-forget via `after(...)`,
+// never throws, silent no-op when SLACK_BOT_TOKEN / SLACK_CHANNEL_PORTAL unset.
+export async function notifyPortalIntroductionForThreads(
+  threadIds: string[],
+): Promise<void> {
+  try {
+    if (threadIds.length === 0) return;
+    const admin = createAdminSupabase();
+    const { data: entries } = await admin
+      .from("client_pipeline_entries")
+      .select("client_id, lead_name, lead_email, thread_id")
+      .in("thread_id", threadIds)
+      .eq("stage", "introduction");
+    if (!entries || entries.length === 0) return;
+
+    for (const e of entries) {
+      const clientId = e.client_id as string | null;
+      if (!clientId) continue;
+      const clientName = await loadClientName(clientId);
+      if (!clientName) continue;
+      const leadName = (e.lead_name as string | null) ?? "(unknown lead)";
+      const leadEmail = (e.lead_email as string | null) ?? null;
+
+      // Best-effort campaign name from the thread.
+      let campaignName: string | null = null;
+      const threadId = e.thread_id as string | null;
+      if (threadId) {
+        const { data: t } = await admin
+          .from("threads")
+          .select("campaign_name")
+          .eq("id", threadId)
+          .maybeSingle();
+        campaignName = (t?.campaign_name as string | null) ?? null;
+      }
+
+      const lines = [
+        `🆕  New introduction · ${clientName}`,
+        `Name: ${leadName}`,
+      ];
+      if (leadEmail) lines.push(`Email: ${leadEmail}`);
+      if (campaignName) lines.push(`Campaign: ${campaignName}`);
+      await postSlackMessage({
+        // Dedicated introductions channel when configured, else the portal channel.
+        channel: env.SLACK_CHANNEL_INTRODUCTIONS ?? env.SLACK_CHANNEL_PORTAL,
+        text: lines.join("\n"),
+      });
+    }
+  } catch (err) {
+    console.error("[slack-portal] notifyPortalIntroductionForThreads failed", err);
   }
 }
 

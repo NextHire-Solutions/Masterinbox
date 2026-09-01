@@ -74,6 +74,31 @@ export const AGENT_PROFILE_PREFERRED_KEYS: readonly string[] = [
   "URL",
 ];
 
+// Whole-dollar production fields that should render as $XXX,XXX,XXX in the
+// portal: Sales Volume, List-side, Buy-side (and their "($)" label variants).
+// Excludes the "(#)" COUNT variants (e.g. "List-side (#)" = 0 deals), which are
+// not dollar amounts. Match is casing / separator / suffix tolerant.
+export function isPortalCurrencyField(key: string): boolean {
+  const k = key.toLowerCase();
+  if (k.includes("#")) return false; // "(#)" = a deal count, not a dollar figure
+  const norm = k.replace(/[^a-z]/g, "");
+  return norm === "salesvolume" || norm === "listside" || norm === "buyside";
+}
+
+// Render a custom-field value for the portal. For the currency fields above,
+// when the value is a plain number (optionally already carrying $ / commas),
+// return it as whole-dollar USD ($12,500,000). Anything else — a range like
+// "$54K - $385K", an abbreviation, non-numeric text, an empty value, or any
+// non-currency field — is returned stringified & trimmed, UNCHANGED, so this
+// can never mangle a value it doesn't fully understand.
+export function formatPortalFieldValue(key: string, value: unknown): string {
+  const raw = value == null ? "" : String(value).trim();
+  if (raw === "" || !isPortalCurrencyField(key)) return raw;
+  const cleaned = raw.replace(/[$,\s]/g, "");
+  if (!/^-?\d+(\.\d+)?$/.test(cleaned)) return raw; // not a plain number → leave as-is
+  return `$${Math.round(Number(cleaned)).toLocaleString("en-US")}`;
+}
+
 export const LICENSE_KEYS: readonly string[] = [
   "License Number",
   "License number",

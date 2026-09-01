@@ -59,12 +59,25 @@ import {
 //   - Member rows show a colored-initial avatar + small green/gray
 //     status dot bottom-right of the avatar
 
+// Plan chip colours, per tier (see client's reference): Production = blue,
+// Minimum = neutral grey, Partner = purple. Unknown tiers fall back to grey.
+const PLAN_STYLE: Record<string, string> = {
+  production: "bg-[#eaf2fd] text-[#1565C0] ring-[#bcd5f1]",
+  minimum: "bg-[#f7f7f8] text-[#3f4650] ring-[#e2e4e8]",
+  partner: "bg-[#f5efff] text-[#7c3aed] ring-[#ddd0f7]",
+};
+
 export function TeamList({
   token,
   members: initial,
+  plan = null,
 }: {
   token: string;
   members: TeamMember[];
+  // Client plan (production | minimum | partner) from the external dashboard.
+  // null when the show_client_plan flag is off or the feed is unavailable →
+  // no chip renders, so the page is unchanged for clients without the flag.
+  plan?: string | null;
 }) {
   const router = useRouter();
   const mounted = useMounted();
@@ -211,6 +224,18 @@ export function TeamList({
       <PortalPageHeader
         title="Team"
         subtitle="Who receives intro notifications and how."
+        titleBadge={
+          plan ? (
+            <span
+              className={cn(
+                "inline-flex items-center rounded-full px-2.5 py-1 text-[12px] font-semibold ring-1",
+                PLAN_STYLE[plan.toLowerCase()] ?? PLAN_STYLE.minimum,
+              )}
+            >
+              Plan: {plan.charAt(0).toUpperCase() + plan.slice(1)}
+            </span>
+          ) : undefined
+        }
         actions={
           <>
             <Button

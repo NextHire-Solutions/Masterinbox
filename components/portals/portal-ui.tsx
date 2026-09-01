@@ -13,15 +13,22 @@ export function PortalPageHeader({
   title,
   subtitle,
   actions,
+  titleBadge,
 }: {
   title: string;
   subtitle?: string;
   actions?: React.ReactNode;
+  // Optional element shown inline to the right of the title (e.g. a plan
+  // badge). Absent on every page that doesn't pass it → no layout change.
+  titleBadge?: React.ReactNode;
 }) {
   return (
     <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
       <div className="min-w-0">
-        <h1 className="text-[22px] font-semibold tracking-tight">{title}</h1>
+        <div className="flex items-center gap-2.5">
+          <h1 className="text-[22px] font-semibold tracking-tight">{title}</h1>
+          {titleBadge ?? null}
+        </div>
         {subtitle ? (
           <p className="mt-1 max-w-2xl text-[13px] leading-relaxed text-[#5b6472]">
             {subtitle}

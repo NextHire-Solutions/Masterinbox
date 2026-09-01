@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import {
   ChevronUp,
   ChevronDown,
+  Check,
   Copy,
   Mail as MailIcon,
   Phone,
@@ -228,6 +230,43 @@ function DetailsTab({
 
   // ---- Card 1: general agent info ----
   const phone = find("phone", "phonenumber", "mobile", "cell", "mobilephone", "cellphone");
+  // Multi-phone + preferred: a staff-maintained list lives on custom_fields.phones,
+  // with the chosen one in custom_fields.preferred_phone. Fall back to the single
+  // derived phone above when no list has been created yet.
+  const storedPhones = Array.isArray(lead.custom_fields?.phones)
+    ? (lead.custom_fields.phones as unknown[])
+        .filter((x): x is string => typeof x === "string" && x.trim() !== "")
+        .map((x) => x.trim())
+    : [];
+  const preferredPhone =
+    typeof lead.custom_fields?.preferred_phone === "string" &&
+    (lead.custom_fields.preferred_phone as string).trim() !== ""
+      ? (lead.custom_fields.preferred_phone as string).trim()
+      : null;
+  const phoneList = storedPhones.length ? storedPhones : phone ? [phone] : [];
+
+  // Agent emails: the lead's own email plus any staff-added emails
+  // (custom_fields.emails). De-duplicated case-insensitively.
+  const storedEmails = Array.isArray(lead.custom_fields?.emails)
+    ? (lead.custom_fields.emails as unknown[])
+        .filter((x): x is string => typeof x === "string" && x.trim() !== "")
+        .map((x) => x.trim())
+    : [];
+  const emailSeen = new Set<string>();
+  const emailList: string[] = [];
+  for (const e of [lead.email, ...storedEmails]) {
+    const t = (e ?? "").trim();
+    if (!t) continue;
+    const k = t.toLowerCase();
+    if (emailSeen.has(k)) continue;
+    emailSeen.add(k);
+    emailList.push(t);
+  }
+  const preferredEmail =
+    typeof lead.custom_fields?.preferred_email === "string" &&
+    (lead.custom_fields.preferred_email as string).trim() !== ""
+      ? (lead.custom_fields.preferred_email as string).trim()
+      : null;
   const website = find(
     "website",
     "websiteurl",
@@ -274,8 +313,18 @@ function DetailsTab({
       <Card title="Agent" defaultOpen>
         <div className="space-y-px">
           <Field icon={Users} label="Name" value={lead.full_name} onCopy={onCopy} />
-          <Field icon={MailIcon} label="Email" value={lead.email} onCopy={onCopy} />
-          <Field icon={Phone} label="Phone" value={phone} onCopy={onCopy} />
+          <AgentEmails
+            threadId={detail.id}
+            emails={emailList}
+            preferred={preferredEmail ?? emailList[0] ?? null}
+            onCopy={onCopy}
+          />
+          <AgentPhones
+            threadId={detail.id}
+            phones={phoneList}
+            preferred={preferredPhone ?? phoneList[0] ?? null}
+            onCopy={onCopy}
+          />
           <Field icon={Building2} label="Company" value={company} onCopy={onCopy} />
           <Field icon={MapPin} label="Location" value={location} onCopy={onCopy} />
           <Field icon={Globe} label="Website" value={website} onCopy={onCopy} />
@@ -318,6 +367,470 @@ function DetailsTab({
 
 // One labelled row in Card 1 — icon, label, value. Value wraps (never
 // truncated) so long campaign names stay fully readable; URLs linkify.
+// Agent email(s), with a "+ Add email" action and a "mark as preferred" checkbox
+// (shown when there are 2+ emails), mirroring AgentPhones.
+//
+// Adding appends the email to the agent's provided values in the external agents
+// DB (never overwrites Courted; max_matches:1) and stores it on the lead.
+// Marking preferred sets the email the client portal shows at introduction
+// (leads.custom_fields.preferred_email + existing pipeline snapshots); it does
+// NOT re-push to the agents DB. Fail-open: any error is just a toast.
+function AgentEmails({
+  threadId,
+  emails,
+  preferred,
+  onCopy,
+}: {
+  threadId: string;
+  emails: string[];
+  preferred: string | null;
+  onCopy?: (v: string) => void;
+}) {
+  const router = useRouter();
+  const [, startTransition] = useTransition();
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [busyEmail, setBusyEmail] = useState<string | null>(null);
+  const multi = emails.length >= 2;
+
+  async function addEmail() {
+    const email = value.trim();
+    if (!email || saving) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/threads/${threadId}/agent-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const j = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        matched?: number;
+        error?: string;
+      };
+      if (res.ok && j.ok) {
+        toast.success(
+          (j.matched ?? 0) > 0
+            ? "Email added, and saved to the agent record."
+            : "Email added.",
+        );
+        setValue("");
+        setOpen(false);
+        startTransition(() => router.refresh());
+      } else {
+        toast.error(j.error ?? "Couldn't add the email.");
+      }
+    } catch {
+      toast.error("Couldn't reach the server.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function markPreferred(email: string) {
+    if (busyEmail !== null || sameEmail(email, preferred)) return;
+    setBusyEmail(email);
+    try {
+      const res = await fetch(`/api/threads/${threadId}/agent-email`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const j = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        entriesUpdated?: number;
+        error?: string;
+      };
+      if (res.ok && j.ok) {
+        const n = j.entriesUpdated ?? 0;
+        toast.success(
+          n > 0
+            ? `Preferred email set. Updated ${n} client portal${n === 1 ? "" : "s"}.`
+            : "Preferred email set.",
+        );
+        startTransition(() => router.refresh());
+      } else {
+        toast.error(j.error ?? "Couldn't set the preferred email.");
+      }
+    } catch {
+      toast.error("Couldn't reach the server.");
+    } finally {
+      setBusyEmail(null);
+    }
+  }
+
+  return (
+    <div>
+      {emails.length > 0 ? (
+        <div className="group flex items-start gap-2.5 py-1.5">
+          <MailIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              Email
+            </div>
+            {multi ? (
+              <div className="mt-1 space-y-1">
+                {emails.map((e) => {
+                  const isPref = sameEmail(e, preferred);
+                  return (
+                    <div key={e} className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        role="checkbox"
+                        aria-checked={isPref}
+                        disabled={busyEmail !== null}
+                        onClick={() => markPreferred(e)}
+                        className={cn(
+                          "flex size-4 shrink-0 items-center justify-center rounded border transition-colors",
+                          isPref
+                            ? "border-foreground bg-foreground text-background"
+                            : "border-muted-foreground/40 hover:border-foreground",
+                          busyEmail !== null && "opacity-60",
+                        )}
+                        aria-label={isPref ? "Preferred email" : "Mark as preferred"}
+                        title={isPref ? "Preferred email" : "Mark as preferred"}
+                      >
+                        {isPref ? <Check className="size-3" /> : null}
+                      </button>
+                      <span className="min-w-0 flex-1 break-words text-sm leading-snug">
+                        {e}
+                      </span>
+                      {isPref ? (
+                        <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                          Preferred
+                        </span>
+                      ) : null}
+                      {onCopy ? (
+                        <button
+                          type="button"
+                          onClick={() => onCopy(e)}
+                          className="shrink-0 text-muted-foreground/0 transition-colors group-hover:text-muted-foreground hover:!text-foreground"
+                          aria-label="Copy email"
+                        >
+                          <Copy className="size-3" />
+                        </button>
+                      ) : null}
+                    </div>
+                  );
+                })}
+                <div className="pt-0.5 text-[11px] text-muted-foreground">
+                  The preferred email is shown in the client portal at introduction.
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-start gap-1.5">
+                <span className="min-w-0 flex-1 break-words text-sm leading-snug">
+                  {emails[0]}
+                </span>
+                {onCopy ? (
+                  <button
+                    type="button"
+                    onClick={() => onCopy(emails[0])}
+                    className="mt-0.5 shrink-0 text-muted-foreground/0 transition-colors group-hover:text-muted-foreground hover:!text-foreground"
+                    aria-label="Copy email"
+                  >
+                    <Copy className="size-3" />
+                  </button>
+                ) : null}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {/* Add-email affordance, aligned under the field value column. */}
+      <div className="pl-6">
+        {open ? (
+          <div className="flex items-center gap-1.5 py-1.5">
+            <input
+              autoFocus
+              type="email"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") addEmail();
+                if (e.key === "Escape") {
+                  setOpen(false);
+                  setValue("");
+                }
+              }}
+              placeholder="name@example.com"
+              className="h-7 flex-1 rounded-md border bg-background px-2 text-[13px] focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+            <button
+              type="button"
+              onClick={addEmail}
+              disabled={saving}
+              className="h-7 rounded-md bg-foreground px-2.5 text-[12px] font-medium text-background disabled:opacity-60"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                setValue("");
+              }}
+              className="h-7 px-1.5 text-[12px] text-muted-foreground hover:text-foreground"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="py-1 text-[12px] font-medium text-muted-foreground hover:text-foreground"
+          >
+            + Add email
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Compare two phone strings by digits, ignoring formatting.
+function samePhone(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  const na = a.replace(/\D/g, "");
+  const nb = b.replace(/\D/g, "");
+  return na && nb ? na === nb : a.trim() === b.trim();
+}
+
+// Compare two emails case-insensitively.
+function sameEmail(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+// Agent phone(s), with a "mark as preferred" control.
+//
+//  - 0 numbers: just a "+ Add phone" affordance (matches the old read-only card).
+//  - 1 number:  the number shown as a normal field row + "+ Add phone".
+//  - 2+ numbers: each number gets a checkbox; the checked one is PREFERRED — the
+//    number the client portal shows once the lead is marked as Introduction.
+//
+// Adding POSTs (external agents DB + stored on the lead); marking preferred
+// PATCHes (lead's preferred_phone + already-introduced portal entries + external
+// agents DB). Both refresh the panel from the server so the list re-renders.
+// Fail-open: any error is just a toast; the inbox never blocks.
+function AgentPhones({
+  threadId,
+  phones,
+  preferred,
+  onCopy,
+}: {
+  threadId: string;
+  phones: string[];
+  preferred: string | null;
+  onCopy?: (v: string) => void;
+}) {
+  const router = useRouter();
+  const [, startTransition] = useTransition();
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [busyPhone, setBusyPhone] = useState<string | null>(null);
+  const multi = phones.length >= 2;
+
+  async function addPhone() {
+    const phone = value.trim();
+    if (!phone || saving) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/threads/${threadId}/agent-phone`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      const j = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        matched?: number;
+        error?: string;
+      };
+      if (res.ok && j.ok) {
+        toast.success(
+          (j.matched ?? 0) > 0
+            ? "Phone added, and saved to the agent record."
+            : "Phone added.",
+        );
+        setValue("");
+        setOpen(false);
+        startTransition(() => router.refresh());
+      } else {
+        toast.error(j.error ?? "Couldn't add the phone number.");
+      }
+    } catch {
+      toast.error("Couldn't reach the server.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function markPreferred(phone: string) {
+    if (busyPhone !== null || samePhone(phone, preferred)) return;
+    setBusyPhone(phone);
+    try {
+      const res = await fetch(`/api/threads/${threadId}/agent-phone`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      const j = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        entriesUpdated?: number;
+        error?: string;
+      };
+      if (res.ok && j.ok) {
+        const n = j.entriesUpdated ?? 0;
+        toast.success(
+          n > 0
+            ? `Preferred number set. Updated ${n} client portal${n === 1 ? "" : "s"}.`
+            : "Preferred number set.",
+        );
+        startTransition(() => router.refresh());
+      } else {
+        toast.error(j.error ?? "Couldn't set the preferred number.");
+      }
+    } catch {
+      toast.error("Couldn't reach the server.");
+    } finally {
+      setBusyPhone(null);
+    }
+  }
+
+  return (
+    <div>
+      {phones.length > 0 ? (
+        <div className="group flex items-start gap-2.5 py-1.5">
+          <Phone className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              Phone
+            </div>
+            {multi ? (
+              <div className="mt-1 space-y-1">
+                {phones.map((p) => {
+                  const isPref = samePhone(p, preferred);
+                  return (
+                    <div key={p} className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        role="checkbox"
+                        aria-checked={isPref}
+                        disabled={busyPhone !== null}
+                        onClick={() => markPreferred(p)}
+                        className={cn(
+                          "flex size-4 shrink-0 items-center justify-center rounded border transition-colors",
+                          isPref
+                            ? "border-foreground bg-foreground text-background"
+                            : "border-muted-foreground/40 hover:border-foreground",
+                          busyPhone !== null && "opacity-60",
+                        )}
+                        aria-label={isPref ? "Preferred number" : "Mark as preferred"}
+                        title={isPref ? "Preferred number" : "Mark as preferred"}
+                      >
+                        {isPref ? <Check className="size-3" /> : null}
+                      </button>
+                      <span className="min-w-0 flex-1 break-words text-sm leading-snug">
+                        {p}
+                      </span>
+                      {isPref ? (
+                        <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                          Preferred
+                        </span>
+                      ) : null}
+                      {onCopy ? (
+                        <button
+                          type="button"
+                          onClick={() => onCopy(p)}
+                          className="shrink-0 text-muted-foreground/0 transition-colors group-hover:text-muted-foreground hover:!text-foreground"
+                          aria-label="Copy phone"
+                        >
+                          <Copy className="size-3" />
+                        </button>
+                      ) : null}
+                    </div>
+                  );
+                })}
+                <div className="pt-0.5 text-[11px] text-muted-foreground">
+                  The preferred number is shown in the client portal at introduction.
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-start gap-1.5">
+                <span className="min-w-0 flex-1 break-words text-sm leading-snug">
+                  {phones[0]}
+                </span>
+                {onCopy ? (
+                  <button
+                    type="button"
+                    onClick={() => onCopy(phones[0])}
+                    className="mt-0.5 shrink-0 text-muted-foreground/0 transition-colors group-hover:text-muted-foreground hover:!text-foreground"
+                    aria-label="Copy phone"
+                  >
+                    <Copy className="size-3" />
+                  </button>
+                ) : null}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {/* Add-phone affordance, aligned under the field value column. */}
+      <div className="pl-6">
+        {open ? (
+          <div className="flex items-center gap-1.5 py-1.5">
+            <input
+              autoFocus
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") addPhone();
+                if (e.key === "Escape") {
+                  setOpen(false);
+                  setValue("");
+                }
+              }}
+              placeholder="+1 (305) 555-0000"
+              className="h-7 flex-1 rounded-md border bg-background px-2 text-[13px] focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+            <button
+              type="button"
+              onClick={addPhone}
+              disabled={saving}
+              className="h-7 rounded-md bg-foreground px-2.5 text-[12px] font-medium text-background disabled:opacity-60"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                setValue("");
+              }}
+              className="h-7 px-1.5 text-[12px] text-muted-foreground hover:text-foreground"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="py-1 text-[12px] font-medium text-muted-foreground hover:text-foreground"
+          >
+            + Add phone
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Field({
   icon: Icon,
   label,

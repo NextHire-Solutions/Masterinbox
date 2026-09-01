@@ -10,7 +10,13 @@ import {
 } from "@/lib/inbox/interest";
 import { notifyIntroductionForThreads } from "@/lib/webhooks/n8n-introduction";
 import { pushIntroPipelineEntriesForThreadsToFub } from "@/lib/integrations/push-pipeline-entry";
+import { notifyPortalIntroductionForThreads } from "@/lib/webhooks/slack-portal";
 import { invalidateInboxClientsCache } from "@/lib/inbox/clients";
+import {
+  snapshotPipelineNotes,
+  restorePipelineNotes,
+  type PipelineNotesSnapshot,
+} from "@/lib/inbox/preserve-pipeline-notes";
 
 export const dynamic = "force-dynamic";
 
@@ -273,6 +279,27 @@ export async function POST(request: Request) {
           }
         }
 
+        // Resolve the label names being applied up front. When Introduction
+        // is among them, snapshot the selected threads' pipeline notes BEFORE
+        // the wipe below: the zero-label window lets the 0033 trigger
+        // cascade-delete each entry (and its notes), and the re-inserted
+        // Introduction label rebuilds fresh, note-less entries. We copy the
+        // notes back onto the rebuilt entries in the introduction block below.
+        const { data: applyLabels } = await supabase
+          .from("labels")
+          .select("id, name")
+          .in("id", data.label_ids);
+        const names = (applyLabels ?? []).map(
+          (l) => (l.name as string | null)?.trim().toLowerCase() ?? "",
+        );
+        let notesSnapshot: PipelineNotesSnapshot | null = null;
+        if (names.includes("introduction")) {
+          notesSnapshot = await snapshotPipelineNotes(
+            createAdminSupabase(),
+            data.thread_ids,
+          );
+        }
+
         // Single-label-per-thread semantics (matches the single-thread
         // POST /api/threads/[id]/labels path) — wipe every existing
         // label assignment on the selected threads first, then upsert
@@ -321,17 +348,9 @@ export async function POST(request: Request) {
         }
         // Introduction / Interested / Not Interested among the
         // applied labels → fan out the matching side-effect for
-        // every selected thread. One SELECT pulls all three names
-        // at once so we don't make three round trips for the same
-        // label_ids list. Done after the upsert + inside after() so
-        // the user-visible response returns immediately.
-        const { data: triggerLabels } = await supabase
-          .from("labels")
-          .select("id, name")
-          .in("id", data.label_ids);
-        const names = (triggerLabels ?? []).map((l) =>
-          (l.name as string | null)?.trim().toLowerCase() ?? "",
-        );
+        // every selected thread. `names` was resolved before the wipe
+        // above. Done after the upsert + inside after() so the
+        // user-visible response returns immediately.
         if (names.includes("introduction")) {
           const threadIds = data.thread_ids;
           after(() =>
@@ -341,6 +360,13 @@ export async function POST(request: Request) {
           // (if connected). Idempotent — skips entries already pushed;
           // errors land on fub_last_error and never break labeling.
           after(() => pushIntroPipelineEntriesForThreadsToFub(threadIds));
+          after(() => notifyPortalIntroductionForThreads(threadIds));
+          // Copy the pre-wipe notes onto the rebuilt pipeline entries
+          // (no-op for entries that survived or already carry notes).
+          if (notesSnapshot) {
+            const snap = notesSnapshot;
+            after(() => restorePipelineNotes(createAdminSupabase(), snap));
+          }
         }
         if (names.includes("interested")) {
           const threadIds = data.thread_ids;

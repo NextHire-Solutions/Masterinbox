@@ -235,10 +235,7 @@ export function PortalShell({
         </nav>
 
         <div className="mt-auto border-t border-[#ebecf0] px-5 py-3 text-[11px] text-[#9aa0ab]">
-          <div className="flex items-center justify-between gap-2">
-            <span>Powered by BrokerStaffer</span>
-            {tourEnabled ? <TakeTheTourButton /> : null}
-          </div>
+          <span>Powered by BrokerStaffer</span>
         </div>
       </aside>
 
@@ -251,10 +248,15 @@ export function PortalShell({
           rules. tourEnabled gates both the bubbles and the replay
           button so real clients see nothing. */}
       {tourEnabled ? (
-        <TourProvider
-          token={token}
-          idealAgentProfileEnabled={idealAgentProfileEnabled}
-        />
+        <>
+          {/* Floating "Take the tour" CTA (bottom-right). Same tourEnabled gate
+              as the tour itself → Demo Portal only, never live clients. */}
+          <TakeTheTourButton />
+          <TourProvider
+            token={token}
+            idealAgentProfileEnabled={idealAgentProfileEnabled}
+          />
+        </>
       ) : null}
       </div>
     </>

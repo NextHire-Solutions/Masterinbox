@@ -80,6 +80,15 @@ export async function proxy(request: NextRequest) {
     // (e.g. follow-up-time). No per-user data; safe to serve without a
     // session, so it must bypass the auth-redirect gate below.
     pathname.startsWith("/api/metrics") ||
+    // /api/outcomes — the attribution-tool feed. Bypasses the SESSION gate
+    // here; the route handler enforces its own `Authorization: Bearer
+    // <OUTCOMES_API_TOKEN>` check (it exposes candidate emails, so it is NOT
+    // open — it just doesn't use a Supabase login).
+    pathname.startsWith("/api/outcomes") ||
+    // /api/reply-labels — same attribution consumer, same Bearer-token auth
+    // in the route handler (reuses OUTCOMES_API_TOKEN). Session-gate bypass
+    // only; not open.
+    pathname.startsWith("/api/reply-labels") ||
     // /api/portal/<token>/... — token in the path IS the credential; the
     // route handlers validate it via lib/portals/token.ts.
     pathname.startsWith("/api/portal/")

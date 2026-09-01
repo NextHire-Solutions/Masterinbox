@@ -7,7 +7,14 @@ import {
   resolveStageLabels,
   safeStageLabelsFor,
   visibleStagesFor,
+  type PipelineStage,
 } from "@/lib/portals/portal-data";
+import {
+  MANAGE_STAGES_FLAG,
+  resolveStageDefs,
+  type StageDef,
+} from "@/lib/portals/stage-config";
+import { loadClientStageRows } from "@/lib/portals/load-stages";
 import {
   PipelineHeader,
   PipelineFooterInfo,
@@ -18,6 +25,7 @@ import { WelcomeRedirect } from "@/components/portals/welcome-redirect";
 import {
   StageLabelsProvider,
   VisibleStagesProvider,
+  StageDefsProvider,
 } from "@/components/portals/stage-labels-context";
 
 // The Recruiting Pipeline IS the portal home now. Every Introduction
@@ -59,17 +67,45 @@ export default async function PortalRoot(props: {
   // 8 stages; flag-enabled clients (Demo Portal) get the additional
   // interview_scheduled tile. Computed server-side and shared
   // across every nested component via VisibleStagesProvider.
-  const visibleStages = visibleStagesFor(client);
+  //
+  // NOTE: `let` because the manage_stages block below may re-derive these
+  // from the client's saved stage config. Every real client keeps the exact
+  // values computed here (the block is gated + fail-open).
+  let visibleStages = visibleStagesFor(client);
   // safeStageLabelsFor masks hidden stages' human labels with the
   // raw enum key BEFORE the prop crosses the server→client boundary,
   // so real clients' View Source never carries "Interview Scheduled"
   // in the SSR hydration payload. Demo Portal (with the flag) gets the
   // full labels through.
-  const stageLabels = safeStageLabelsFor(fullLabels, visibleStages);
+  let stageLabels = safeStageLabelsFor(fullLabels, visibleStages);
+
+  // manage_stages (Demo Portal only): drive the CANONICAL stages' ORDER,
+  // LABELS, and VISIBILITY from the client's saved stage config. Fail-open —
+  // no rows yet, or any load error, leaves the exact defaults above untouched.
+  // Custom stages are NOT rendered here (a later step). The board component is
+  // unchanged; only the data it receives (visibleStages order + labels) differs.
+  const manageStagesEnabled = clientHasFeature(client, MANAGE_STAGES_FLAG);
+  let manageStages: StageDef[] | undefined;
+  if (manageStagesEnabled) {
+    const defs = resolveStageDefs(client, await loadClientStageRows(client.id));
+    manageStages = defs; // full list (incl. hidden) for the Manage Stages editor
+    const orderedCanonical = defs
+      .filter((d) => d.kind === "canonical" && !d.hidden && d.canonicalStage)
+      .map((d) => d.canonicalStage as PipelineStage);
+    if (orderedCanonical.length > 0) {
+      const cfgLabels = { ...fullLabels };
+      for (const d of defs) {
+        if (d.canonicalStage) cfgLabels[d.canonicalStage] = d.label;
+      }
+      visibleStages = orderedCanonical;
+      stageLabels = safeStageLabelsFor(cfgLabels, visibleStages);
+    }
+  }
 
   return (
     <StageLabelsProvider value={stageLabels}>
       <VisibleStagesProvider value={visibleStages}>
+        <StageDefsProvider value={manageStagesEnabled ? manageStages ?? null : null}>
         <WelcomeRedirect token={token} />
         <PipelineHeader clientName={client.name} />
         <PipelineBoard
@@ -82,8 +118,12 @@ export default async function PortalRoot(props: {
           csvUploadEnabled={clientHasFeature(client, "pipeline_csv_upload")}
           kanbanViewEnabled={clientHasFeature(client, "pipeline_kanban_view")}
           sourceSplitEnabled={clientHasFeature(client, "pipeline_source_split")}
+          boardEnhanced={clientHasFeature(client, "pipeline_board_enhanced")}
+          manageStagesEnabled={manageStagesEnabled}
+          manageStages={manageStages}
         />
         <PipelineFooterInfo />
+        </StageDefsProvider>
       </VisibleStagesProvider>
     </StageLabelsProvider>
   );

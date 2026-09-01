@@ -38,6 +38,27 @@ export async function POST(
   const { name, email, title, phone } = parsed.data;
 
   const admin = createAdminSupabase();
+
+  // Block only an EXACT (name + email) repeat — a different person on the same
+  // group email is allowed. Email is citext, so the match is case-insensitive.
+  const { data: dupes } = await admin
+    .from("client_team_members")
+    .select("id, name")
+    .eq("client_id", client.id)
+    .eq("email", email);
+  if (
+    (dupes ?? []).some(
+      (d) =>
+        (d.name as string | null)?.trim().toLowerCase() ===
+        name.trim().toLowerCase(),
+    )
+  ) {
+    return NextResponse.json(
+      { error: "This person is already on the team." },
+      { status: 409 },
+    );
+  }
+
   // `receives` is no longer collected from the UI (notification
   // delivery isn't wired up); the DB column keeps its default value
   // until/unless that feature returns.
@@ -55,8 +76,10 @@ export async function POST(
     .single();
   if (error) {
     if (error.code === "23505") {
+      // Only reachable from the legacy (client_id, email) unique index BEFORE
+      // the migration that drops it — until then a shared email is blocked.
       return NextResponse.json(
-        { error: "Someone with that email is already on the team." },
+        { error: "That email is already used by another team member." },
         { status: 409 },
       );
     }

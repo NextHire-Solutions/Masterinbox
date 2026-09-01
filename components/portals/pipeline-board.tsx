@@ -58,8 +58,11 @@ import {
 import {
   useStageLabels,
   useVisibleStages,
+  useStageDefs,
 } from "@/components/portals/stage-labels-context";
 import { StageLabelEditor } from "@/components/portals/stage-label-editor";
+import { StageManager } from "@/components/portals/stage-manager";
+import type { StageDef } from "@/lib/portals/stage-config";
 import {
   PortalEmpty,
   Avatar,
@@ -83,6 +86,11 @@ import {
   type PipelineCsvRow,
 } from "@/lib/portals/csv";
 import { formatPhoneDisplay } from "@/lib/portals/phone";
+import {
+  NO_SHOW_STAGE,
+  NO_SHOW_WINDOW_MESSAGE,
+  noShowMoveAllowed,
+} from "@/lib/portals/no-show-window";
 
 // Stage → coloured chip. Tone matches the Google Sheets pipeline board:
 // saturated fill, white text — readable at a glance across a long table.
@@ -181,6 +189,9 @@ export function PipelineBoard({
   csvUploadEnabled = false,
   kanbanViewEnabled = false,
   sourceSplitEnabled = false,
+  boardEnhanced = false,
+  manageStagesEnabled = false,
+  manageStages,
 }: {
   token: string;
   entries: PipelineEntry[];
@@ -208,6 +219,15 @@ export function PipelineBoard({
   csvUploadEnabled?: boolean;
   kanbanViewEnabled?: boolean;
   sourceSplitEnabled?: boolean;
+  // Demo-only board enhancements (fixed-height scrolling columns + sales-volume
+  // totals). Real clients default false → their board view is unchanged.
+  boardEnhanced?: boolean;
+  // Demo-only (manage_stages): renders the Manage Stages editor in place of the
+  // rename card, seeded with the full stage config (incl. hidden). Real clients
+  // default false / undefined → the existing StageLabelEditor renders unchanged
+  // and no manage-stages strings enter the SSR payload.
+  manageStagesEnabled?: boolean;
+  manageStages?: StageDef[];
 }) {
   const router = useRouter();
   const mounted = useMounted();
@@ -335,6 +355,29 @@ export function PipelineBoard({
     void patch(id, { stage });
   }
 
+  // Kanban drop handler that understands custom stages (manage_stages / Demo).
+  // A custom column sets the display-only overlay (no enum change, no side-effects);
+  // a canonical column moves the enum stage and clears the overlay. For real clients
+  // (no manageStages) every key is canonical, so this behaves exactly like changeStage.
+  function changeDisplayStage(id: string, key: string) {
+    const isCustom = (manageStages ?? []).some(
+      (d) => d.kind === "custom" && d.key === key,
+    );
+    if (isCustom) {
+      setEntries((cur) =>
+        cur.map((e) => (e.id === id ? { ...e, custom_stage_key: key } : e)),
+      );
+      void patch(id, { custom_stage_key: key });
+    } else {
+      setEntries((cur) =>
+        cur.map((e) =>
+          e.id === id ? { ...e, stage: key as PipelineStage, custom_stage_key: null } : e,
+        ),
+      );
+      void patch(id, { stage: key as PipelineStage });
+    }
+  }
+
   function applyEntryEdit(id: string, patchEdits: Partial<PipelineEntry>) {
     setEntries((cur) => cur.map((e) => (e.id === id ? { ...e, ...patchEdits } : e)));
   }
@@ -405,6 +448,7 @@ export function PipelineBoard({
     const ids = Array.from(selected);
     setEntries((cur) => cur.map((e) => (selected.has(e.id) ? { ...e, stage } : e)));
     setSelected(new Set());
+    let blocked = 0;
     for (let i = 0; i < ids.length; i += BULK_CHUNK) {
       const slice = ids.slice(i, i + BULK_CHUNK);
       const res = await fetch(`/api/portal/${token}/pipeline`, {
@@ -419,9 +463,21 @@ export function PipelineBoard({
         router.refresh();
         return;
       }
+      const j = await res.json().catch(() => ({}));
+      blocked += typeof j.noShowBlocked === "number" ? j.noShowBlocked : 0;
     }
     setBulkBusy(false);
-    toast.success(`Moved ${ids.length.toLocaleString()} to ${stageLabels[stage]}`);
+    if (blocked > 0) {
+      // Some entries were outside the 24h No Show window; the server skipped
+      // them. Refresh so those cards revert from the optimistic move.
+      router.refresh();
+      const moved = ids.length - blocked;
+      toast.info(
+        `Moved ${moved.toLocaleString()} to ${stageLabels[stage]}. ${blocked.toLocaleString()} skipped — ${NO_SHOW_WINDOW_MESSAGE}`,
+      );
+    } else {
+      toast.success(`Moved ${ids.length.toLocaleString()} to ${stageLabels[stage]}`);
+    }
   }
 
   // Per-row assignment mutation: optimistic local update + single
@@ -501,6 +557,27 @@ export function PipelineBoard({
       ? entries.filter((e) => selected.has(e.id))
       : filtered;
     if (rows.length === 0) return;
+    // Collect the union of custom-field keys across the exported rows so every
+    // one gets its own column. Uses the SAME filter as the card / edit dialog
+    // (editableCustomFields drops dedicated + machine-noise keys), and matches
+    // case-insensitively — a field seen as "Sales Volume" on one row and
+    // "sales volume" on another is one column. First-seen casing wins the
+    // header label; each row's value is looked up case-insensitively.
+    const customKeys: string[] = [];
+    const seenKeys = new Set<string>();
+    const customByRow = new Map<string, Record<string, string>>();
+    for (const r of rows) {
+      const map: Record<string, string> = {};
+      for (const [k, v] of editableCustomFields(r)) {
+        const lk = k.toLowerCase();
+        map[lk] = v;
+        if (!seenKeys.has(lk)) {
+          seenKeys.add(lk);
+          customKeys.push(k);
+        }
+      }
+      customByRow.set(r.id, map);
+    }
     const cols = [
       "Name",
       "Email",
@@ -511,9 +588,11 @@ export function PipelineBoard({
       "Stage",
       "Assigned",
       "Introduced",
+      ...customKeys.map(prettyFieldLabel),
     ];
     const lines = [cols.join(",")];
     for (const r of rows) {
+      const cm = customByRow.get(r.id) ?? {};
       const row = [
         r.lead_name ?? "",
         r.lead_email ?? "",
@@ -524,6 +603,7 @@ export function PipelineBoard({
         stageLabels[r.stage],
         r.assigned_team_member?.name ?? "",
         r.introduced_at ? new Date(r.introduced_at).toISOString().slice(0, 10) : "",
+        ...customKeys.map((k) => cm[k.toLowerCase()] ?? ""),
       ];
       lines.push(row.map(csvCell).join(","));
     }
@@ -587,10 +667,11 @@ export function PipelineBoard({
 
   return (
     <div className="mx-auto max-w-6xl px-4 pb-12 pt-6 sm:px-6">
-      <StageLabelEditor
-        token={token}
-        savedOverrides={stageLabelOverrides}
-      />
+      {manageStagesEnabled && manageStages ? (
+        <StageManager token={token} stages={manageStages} />
+      ) : (
+        <StageLabelEditor token={token} savedOverrides={stageLabelOverrides} />
+      )}
       {entries.length === 0 ? (
         <div className="space-y-3">
           <PortalEmpty
@@ -871,9 +952,11 @@ export function PipelineBoard({
                   entries={filtered}
                   visibleStages={visibleStages}
                   stageLabels={stageLabels}
+                  stageDefs={manageStagesEnabled ? manageStages : undefined}
                   showSource={sourceSplitEnabled}
+                  enhanced={boardEnhanced}
                   onCardClick={(e) => setDetailTarget(e)}
-                  onStageChange={(id, stage) => changeStage(id, stage)}
+                  onStageChange={changeDisplayStage}
                 />
               )}
             </div>
@@ -919,7 +1002,7 @@ export function PipelineBoard({
                         expanded={expanded}
                         selected={selected.has(e.id)}
                         onToggleSelect={() => toggleSelect(e.id)}
-                        onStage={(s) => changeStage(e.id, s)}
+                        onStage={(s) => changeDisplayStage(e.id, s)}
                         onAssign={(memberId) => assignOne(e, memberId)}
                         teamMembers={teamMembers}
                         onOpenNotes={() => setOpenNotes(e)}
@@ -974,7 +1057,7 @@ export function PipelineBoard({
                   expanded={expandedId === e.id}
                   selected={selected.has(e.id)}
                   onToggleSelect={() => toggleSelect(e.id)}
-                  onStage={(s) => changeStage(e.id, s)}
+                  onStage={(s) => changeDisplayStage(e.id, s)}
                   onAssign={(memberId) => assignOne(e, memberId)}
                   teamMembers={teamMembers}
                   onOpenNotes={() => setOpenNotes(e)}
@@ -1281,7 +1364,7 @@ function PipelineRow({
   expanded: boolean;
   selected: boolean;
   onToggleSelect: () => void;
-  onStage: (s: PipelineStage) => void;
+  onStage: (s: string) => void;
   onAssign: (memberId: string | null) => void;
   teamMembers: TeamMember[];
   onOpenNotes: () => void;
@@ -1472,7 +1555,14 @@ function PipelineRow({
       </div>
       <div className="text-[12.5px] text-[#5b6472]">{fmtDate(entry.introduced_at)}</div>
       <div className="flex flex-col items-start gap-1.5">
-        <StageSelector value={entry.stage} onChange={onStage} />
+        <StageSelector
+          value={entry.custom_stage_key ?? entry.stage}
+          onChange={onStage}
+          noShowLocked={
+            entry.stage !== NO_SHOW_STAGE &&
+            !noShowMoveAllowed(entry.introduced_at)
+          }
+        />
         <AssignedSelector
           value={entry.assigned_team_member}
           members={teamMembers}
@@ -1531,7 +1621,7 @@ function PipelineMobileCard({
   expanded: boolean;
   selected: boolean;
   onToggleSelect: () => void;
-  onStage: (s: PipelineStage) => void;
+  onStage: (s: string) => void;
   onAssign: (memberId: string | null) => void;
   teamMembers: TeamMember[];
   onOpenNotes: () => void;
@@ -1637,7 +1727,14 @@ function PipelineMobileCard({
         </div>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <StageSelector value={entry.stage} onChange={onStage} />
+        <StageSelector
+          value={entry.custom_stage_key ?? entry.stage}
+          onChange={onStage}
+          noShowLocked={
+            entry.stage !== NO_SHOW_STAGE &&
+            !noShowMoveAllowed(entry.introduced_at)
+          }
+        />
         <AssignedSelector
           value={entry.assigned_team_member}
           members={teamMembers}
@@ -1798,21 +1895,40 @@ function AssignedSelector({
 function StageSelector({
   value,
   onChange,
+  noShowLocked = false,
 }: {
-  value: PipelineStage;
-  onChange: (s: PipelineStage) => void;
+  // Display key: a canonical enum value, or (manage_stages) a custom stage key.
+  value: string;
+  onChange: (s: string) => void;
+  // True once the 24h No Show window has closed for this entry — the No Show
+  // option is then shown disabled with a reason (the server enforces it too).
+  noShowLocked?: boolean;
 }) {
-  const style = STAGE_STYLE[value];
   const stageLabels = useStageLabels();
-  // Per-client visible stages. If the current entry is in a stage
-  // hidden for this client (e.g. a row that's somehow already in
-  // interview_scheduled state for a real client), we still include
-  // it so the operator can move it out — never let the row become
-  // unselectable. Otherwise we'd trap the data.
+  // Per-client visible stages. If the current entry is in a stage hidden for this
+  // client, we still include it so the operator can move it out — never trap a row.
   const visibleStages = useVisibleStages();
-  const dropdownStages = visibleStages.includes(value)
-    ? visibleStages
-    : [...visibleStages, value];
+  // Full stage config for manage_stages clients (Demo); null for everyone else,
+  // in which case this is exactly the canonical enum path.
+  const defs = useStageDefs();
+
+  const defByKey = defs ? new Map(defs.map((d) => [d.key, d])) : null;
+  const baseOptions: string[] = defs
+    ? defs.filter((d) => !d.hidden).map((d) => d.key)
+    : visibleStages;
+  const dropdownStages = baseOptions.includes(value)
+    ? baseOptions
+    : [...baseOptions, value];
+
+  const labelOf = (key: string): string =>
+    defByKey?.get(key)?.label ?? stageLabels[key as PipelineStage] ?? key;
+  const customHexOf = (key: string): string | null => {
+    const d = defByKey?.get(key);
+    return d && d.kind === "custom" ? d.color : null;
+  };
+  const valHex = customHexOf(value);
+  const valStyle = STAGE_STYLE[value as PipelineStage];
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -1821,26 +1937,37 @@ function StageSelector({
             type="button"
             className={cn(
               "inline-flex items-center justify-between gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-semibold transition-all hover:brightness-95",
-              style.bg,
-              style.text,
+              valHex ? "text-white" : cn(valStyle?.bg, valStyle?.text),
             )}
+            style={valHex ? { backgroundColor: valHex } : undefined}
           >
-            <span className="truncate">{stageLabels[value]}</span>
+            <span className="truncate">{labelOf(value)}</span>
             <ChevronDown className="size-3 shrink-0 opacity-70" />
           </button>
         }
       />
       <DropdownMenuContent align="start" className="w-48">
-        {dropdownStages.map((s) => (
-          <DropdownMenuItem
-            key={s}
-            onClick={() => onChange(s)}
-            className="flex items-center justify-between gap-2"
-          >
-            <span className="text-[13px]">{stageLabels[s]}</span>
-            {s === value ? <Check className="size-3.5 text-[#1565C0]" /> : null}
-          </DropdownMenuItem>
-        ))}
+        {dropdownStages.map((s) => {
+          const locked = noShowLocked && s === NO_SHOW_STAGE;
+          return (
+            <DropdownMenuItem
+              key={s}
+              disabled={locked}
+              onClick={locked ? undefined : () => onChange(s)}
+              className="flex items-center justify-between gap-2"
+            >
+              <span className="flex flex-col">
+                <span className="text-[13px]">{labelOf(s)}</span>
+                {locked ? (
+                  <span className="text-[10.5px] text-[#9aa0ab]">
+                    Only within 24h of introduction
+                  </span>
+                ) : null}
+              </span>
+              {s === value ? <Check className="size-3.5 text-[#1565C0]" /> : null}
+            </DropdownMenuItem>
+          );
+        })}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -1868,6 +1995,7 @@ function NotesSheet({
   const [editing, setEditing] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const stageLabels = useStageLabels();
+  const stageDefs = useStageDefs();
 
   async function addNote() {
     const body = draft.trim();
@@ -1938,7 +2066,13 @@ function NotesSheet({
       ?.custom_fields ?? {}) as Record<string, unknown>;
   const phone = entry.lead_phone || pickFirstString(cf, PHONE_KEYS);
   const isReplacement = entry.stage === "no_show" || entry.needs_replacement;
-  const stageStyle = STAGE_STYLE[entry.stage];
+  // Display stage: custom overlay if set (manage_stages), else the canonical stage.
+  // Flag-off entries always resolve to the canonical badge (identical to before).
+  const dispKey = entry.custom_stage_key ?? entry.stage;
+  const dispDef = stageDefs ? stageDefs.find((d) => d.key === dispKey) : null;
+  const dispHex = dispDef && dispDef.kind === "custom" ? dispDef.color : null;
+  const dispLabel = dispDef?.label ?? stageLabels[entry.stage];
+  const stageStyle = STAGE_STYLE[dispKey as PipelineStage];
 
   // Detail row icons — uniform 32px gray-bg rounded squares to the
   // left of every fact so the sheet reads as a tidy list.
@@ -1959,12 +2093,12 @@ function NotesSheet({
         <span
           className={cn(
             "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-semibold",
-            stageStyle.bg,
-            stageStyle.text,
+            dispHex ? "text-white" : cn(stageStyle?.bg, stageStyle?.text),
           )}
+          style={dispHex ? { backgroundColor: dispHex } : undefined}
         >
           <span className="size-1.5 rounded-full bg-white/80" />
-          {stageLabels[entry.stage]}
+          {dispLabel}
         </span>
       ),
     },
@@ -2286,6 +2420,30 @@ function EditLeadDialog({
   const [customValues, setCustomValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(initialCustom),
   );
+  // Brand-new custom fields the user adds via "+ Add field". Each row is an
+  // independent {name, value}; only rows with a non-empty name are saved, and
+  // they flow through the SAME custom_fields patch as edited existing fields.
+  const [addedFields, setAddedFields] = useState<
+    Array<{ id: string; name: string; value: string }>
+  >([]);
+  const nextFieldId = useRef(0);
+  function addCustomField() {
+    setAddedFields((cur) => [
+      ...cur,
+      { id: `new-${nextFieldId.current++}`, name: "", value: "" },
+    ]);
+  }
+  // Existing manual fields the user marked for deletion this session. Only
+  // manually-added fields are deletable — an enrichment field would just
+  // reload from Bison, so those aren't offered a delete control.
+  const [removedKeys, setRemovedKeys] = useState<string[]>([]);
+  const manualKeySet = useMemo(
+    () =>
+      new Set(
+        (initial?.manual_custom_field_keys ?? []).map((k) => k.toLowerCase()),
+      ),
+    [initial],
+  );
   const [pending, startTransition] = useTransition();
 
   async function submit() {
@@ -2310,14 +2468,54 @@ function EditLeadDialog({
     // re-sync); the endpoint merges this patch into the override map.
     const customFieldsDelta: Record<string, string> = {};
     for (const [k, original] of initialCustom) {
+      if (removedKeys.includes(k)) continue; // being deleted — skip its value
       const next = customValues[k] ?? "";
       if (next !== original) customFieldsDelta[k] = next;
     }
+    const newlyAddedKeys: string[] = [];
+
+    // Fold in brand-new fields. Validate client-side so the user gets a clear
+    // message instead of a 400 (mirrors the route's ≤120 key / ≤2000 value /
+    // ≤60 keys limits), and guard against built-in and duplicate keys. A row
+    // with an empty name is simply ignored.
+    const existingKeysLower = new Set(initialCustom.map(([k]) => k.toLowerCase()));
+    const seenNew = new Set<string>();
+    for (const f of addedFields) {
+      const key = f.name.trim();
+      if (!key) continue;
+      const lk = key.toLowerCase();
+      if (key.length > 120) {
+        toast.error(`Field name is too long (max 120 characters).`);
+        return;
+      }
+      if (f.value.length > 2000) {
+        toast.error(`Value for "${prettyFieldLabel(key)}" is too long (max 2000).`);
+        return;
+      }
+      if (CUSTOM_FIELD_SKIP.has(lk) || /profile$/i.test(key)) {
+        toast.error(`"${prettyFieldLabel(key)}" is a built-in field — use the fields above.`);
+        return;
+      }
+      if (existingKeysLower.has(lk) || seenNew.has(lk)) {
+        toast.error(`"${prettyFieldLabel(key)}" already exists.`);
+        return;
+      }
+      seenNew.add(lk);
+      customFieldsDelta[key] = f.value;
+      newlyAddedKeys.push(key);
+    }
+    if (Object.keys(customFieldsDelta).length > 60) {
+      toast.error("Too many custom fields changed at once (max 60).");
+      return;
+    }
+
     const hasCustomEdits = Object.keys(customFieldsDelta).length > 0;
+    const hasRemovals = removedKeys.length > 0;
 
     const body: Record<string, unknown> = {
       ...columnEdits,
       ...(hasCustomEdits ? { custom_fields: customFieldsDelta } : {}),
+      ...(hasRemovals ? { custom_fields_remove: removedKeys } : {}),
     };
 
     if (target.mode === "create") {
@@ -2335,6 +2533,7 @@ function EditLeadDialog({
       const newRow: PipelineEntry = {
         id: j.id,
         stage: "introduction",
+        custom_stage_key: null,
         needs_replacement: columnEdits.needs_replacement,
         lead_name: columnEdits.lead_name,
         lead_email: columnEdits.lead_email,
@@ -2386,21 +2585,34 @@ function EditLeadDialog({
     // changed) a rebuilt lead_detail.custom_fields so the expanded
     // card reflects the edit immediately without a refetch.
     const optimistic: Partial<PipelineEntry> = { ...columnEdits };
-    if (hasCustomEdits) {
+    if (hasCustomEdits || hasRemovals) {
       const prevDetail =
         (target.entry.lead_detail as {
           custom_fields?: Record<string, unknown>;
         } | null) ?? null;
       const prevCf = (prevDetail?.custom_fields ?? {}) as Record<string, unknown>;
+      const nextCf = { ...prevCf, ...customFieldsDelta };
+      for (const k of removedKeys) delete nextCf[k];
       optimistic.lead_detail = {
         ...(prevDetail ?? {}),
-        custom_fields: { ...prevCf, ...customFieldsDelta },
+        custom_fields: nextCf,
       };
+      // Keep the manual-key list in sync so a just-added field is immediately
+      // deletable and a removed one stops offering delete, without a reload.
+      optimistic.manual_custom_field_keys = [
+        ...(target.entry.manual_custom_field_keys ?? []).filter(
+          (k) => !removedKeys.includes(k),
+        ),
+        ...newlyAddedKeys,
+      ];
     }
     onApply(target.entry.id, optimistic);
     toast.success("Lead updated");
     onClose();
   }
+
+  // Existing custom fields still on screen (those not marked for deletion).
+  const visibleCustom = initialCustom.filter(([k]) => !removedKeys.includes(k));
 
   return (
     <Dialog open onOpenChange={(v) => !v && onClose()}>
@@ -2469,24 +2681,102 @@ function EditLeadDialog({
             overrides — they never touch the shared lead or overwrite the
             original Bison data, and clearing a value back to its original
             reverts it. */}
-        {target.mode === "edit" && initialCustom.length > 0 ? (
+        {target.mode === "edit" ? (
           <div className="mt-1 border-t border-[#ebecf0] pt-3">
             <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-[#9aa0ab]">
               Custom fields
             </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {initialCustom.map(([key]) => (
-                <div key={key}>
-                  <Label className="text-[12px]">{prettyFieldLabel(key)}</Label>
-                  <Input
-                    value={customValues[key] ?? ""}
-                    onChange={(e) =>
-                      setCustomValues((cur) => ({ ...cur, [key]: e.target.value }))
-                    }
-                  />
-                </div>
-              ))}
-            </div>
+            {visibleCustom.length > 0 ? (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {visibleCustom.map(([key]) => {
+                  const deletable = manualKeySet.has(key.toLowerCase());
+                  return (
+                    <div key={key}>
+                      <div className="flex items-center justify-between gap-2">
+                        <Label className="text-[12px]">{prettyFieldLabel(key)}</Label>
+                        {deletable ? (
+                          <button
+                            type="button"
+                            onClick={() => setRemovedKeys((cur) => [...cur, key])}
+                            className="shrink-0 text-[#c0c4cc] transition-colors hover:text-red-600"
+                            aria-label={`Delete ${prettyFieldLabel(key)}`}
+                            title="Delete this field"
+                          >
+                            <X className="size-3.5" />
+                          </button>
+                        ) : null}
+                      </div>
+                      <Input
+                        value={customValues[key] ?? ""}
+                        onChange={(e) =>
+                          setCustomValues((cur) => ({ ...cur, [key]: e.target.value }))
+                        }
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+            {/* Newly-added fields: a name + value per row, removable before
+                save. On save they merge into this entry's overrides and render
+                on the card like any other field. */}
+            {addedFields.length > 0 ? (
+              <div className="mt-3 flex flex-col gap-2">
+                {addedFields.map((f) => (
+                  <div key={f.id} className="flex items-end gap-2">
+                    <div className="flex-1">
+                      <Label className="text-[12px]">Field name</Label>
+                      <Input
+                        value={f.name}
+                        placeholder="e.g. Coaching Status"
+                        onChange={(e) =>
+                          setAddedFields((cur) =>
+                            cur.map((x) =>
+                              x.id === f.id ? { ...x, name: e.target.value } : x,
+                            ),
+                          )
+                        }
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <Label className="text-[12px]">Value</Label>
+                      <Input
+                        value={f.value}
+                        placeholder="e.g. Active"
+                        onChange={(e) =>
+                          setAddedFields((cur) =>
+                            cur.map((x) =>
+                              x.id === f.id ? { ...x, value: e.target.value } : x,
+                            ),
+                          )
+                        }
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="mb-0.5 shrink-0 text-[#9aa0ab] hover:text-[#0f1320]"
+                      onClick={() =>
+                        setAddedFields((cur) => cur.filter((x) => x.id !== f.id))
+                      }
+                      aria-label="Remove field"
+                    >
+                      <X className="size-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-3"
+              onClick={addCustomField}
+            >
+              <Plus className="size-3.5" /> Add field
+            </Button>
           </div>
         ) : null}
         <DialogFooter>

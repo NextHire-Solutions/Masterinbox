@@ -81,6 +81,11 @@ export const env = {
   get SLACK_CHANNEL_PORTAL() {
     return lazyOptional("SLACK_CHANNEL_PORTAL")();
   },
+  // Dedicated channel for "new introduction" alerts. Falls back to
+  // SLACK_CHANNEL_PORTAL when unset so the notifier still works without it.
+  get SLACK_CHANNEL_INTRODUCTIONS() {
+    return lazyOptional("SLACK_CHANNEL_INTRODUCTIONS")();
+  },
   // Hard-pinned singleton workspace UUID. Setting this lets requireSession
   // skip the per-request Supabase query that resolves "which workspace am
   // I in" — saving ~280ms × every page render on the single-tenant
@@ -91,6 +96,35 @@ export const env = {
     return (
       lazyOptional("WORKSPACE_ID")() ?? lazyOptional("COROFY_WORKSPACE_ID")()
     );
+  },
+  // Bearer token for the public GET /api/outcomes attribution feed. A
+  // DEDICATED secret — deliberately NOT the Supabase service-role key — so the
+  // external tool that polls outcomes can never touch the database directly and
+  // can be rotated in isolation. Optional: when unset the endpoint refuses all
+  // requests (401), so a missing env fails closed rather than open.
+  get OUTCOMES_API_TOKEN() {
+    return lazyOptional("OUTCOMES_API_TOKEN")();
+  },
+  // External client-status feed (active/paused/churned) that the sidebar's
+  // Client List reads to show 🟢/🟡/🔴. Lives in a separate app — MasterInbox
+  // does NOT own this data. Both optional: when either is unset the internal
+  // proxy returns no status and the sidebar renders exactly as before (fail
+  // open — a missing/broken feed must never affect the live inbox).
+  get CLIENT_STATUS_URL() {
+    return lazyOptional("CLIENT_STATUS_URL")();
+  },
+  get CLIENT_STATUS_TOKEN() {
+    return lazyOptional("CLIENT_STATUS_TOKEN")();
+  },
+  // External "agents contact" DB (a separate app; MasterInbox does not own it).
+  // Used ONLY when staff add a phone from the inbox Agent card, to push it into
+  // that agents DB. Token optional: when unset the save fails closed with a
+  // clear "not configured" message and nothing is called.
+  get AGENTS_CONTACT_URL() {
+    return process.env.AGENTS_CONTACT_URL ?? "https://web-production-34f4a.up.railway.app";
+  },
+  get AGENTS_CONTACT_TOKEN() {
+    return lazyOptional("AGENTS_CONTACT_TOKEN")();
   },
 };
 

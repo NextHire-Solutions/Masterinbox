@@ -5,6 +5,13 @@ import { resolvePortalClient } from "@/lib/portals/token";
 import { notifyIntroduction } from "@/lib/webhooks/n8n-introduction";
 import { notifyPortalStageChange } from "@/lib/webhooks/slack-portal";
 import { pushPipelineEntryToFub } from "@/lib/integrations/push-pipeline-entry";
+import { clientHasFeature } from "@/lib/portals/feature-flags";
+import { MANAGE_STAGES_FLAG } from "@/lib/portals/stage-config";
+import {
+  NO_SHOW_STAGE,
+  NO_SHOW_WINDOW_MESSAGE,
+  noShowMoveAllowed,
+} from "@/lib/portals/no-show-window";
 
 // PATCH /api/portal/[token]/pipeline/[id]
 // DELETE /api/portal/[token]/pipeline/[id]
@@ -30,6 +37,10 @@ const STAGES = [
 
 const schema = z.object({
   stage: z.enum(STAGES).optional(),
+  // Display-only custom-stage placement (manage_stages / Demo). Ignored for real
+  // clients (the handler is gated). Never written as a column for anyone else —
+  // it's pulled out of columnPatch below and only used in the gated block.
+  custom_stage_key: z.string().max(64).nullable().optional(),
   needs_replacement: z.boolean().optional(),
   lead_name: z.string().max(200).nullable().optional(),
   lead_email: z.string().email().max(200).nullable().optional(),
@@ -56,6 +67,10 @@ const schema = z.object({
       message: "Too many custom fields",
     })
     .optional(),
+  // Keys to DELETE from the override map — fields the user added manually and
+  // then removed. Additive to custom_fields (both may appear in one request);
+  // deleting a key the client never overrode is a harmless no-op.
+  custom_fields_remove: z.array(z.string().max(120)).max(60).optional(),
 });
 
 export async function PATCH(
@@ -85,7 +100,40 @@ export async function PATCH(
   // edits — it targets the custom_fields_overrides JSONB, not a
   // same-named column, and is merged (not replaced) so partial edits
   // don't wipe previously-overridden keys.
-  const { custom_fields: customFieldsPatch, ...columnPatch } = parsed.data;
+  const {
+    custom_fields: customFieldsPatch,
+    custom_fields_remove: customFieldsRemove,
+    custom_stage_key: customStageKey,
+    ...columnPatch
+  } = parsed.data;
+
+  const manageStages = clientHasFeature(client, MANAGE_STAGES_FLAG);
+
+  // Custom-stage placement (manage_stages / Demo only): a DISPLAY-ONLY move into a
+  // custom column. Sets the overlay pointer, never the enum `stage`, and fires NO
+  // side-effects (no Slack / n8n / FUB). Real clients never reach this (gated), and
+  // custom_stage_key is excluded from columnPatch above so it's never written for them.
+  if (manageStages && customStageKey !== undefined) {
+    if (customStageKey !== null) {
+      const { data: st } = await admin
+        .from("client_pipeline_stages")
+        .select("key")
+        .eq("client_id", client.id)
+        .eq("kind", "custom")
+        .eq("key", customStageKey)
+        .maybeSingle();
+      if (!st) {
+        return NextResponse.json({ error: "Unknown custom stage" }, { status: 400 });
+      }
+    }
+    const { error: cErr } = await admin
+      .from("client_pipeline_entries")
+      .update({ custom_stage_key: customStageKey, updated_at: new Date().toISOString() })
+      .eq("id", id)
+      .eq("client_id", client.id);
+    if (cErr) return NextResponse.json({ error: cErr.message }, { status: 400 });
+    return NextResponse.json({ ok: true });
+  }
 
   // Snapshot pre-update stage so the Slack notification can show
   // "from → to". One row, indexed lookup — negligible cost. Reading
@@ -95,30 +143,58 @@ export async function PATCH(
   if (parsed.data.stage !== undefined) {
     const { data: prior } = await admin
       .from("client_pipeline_entries")
-      .select("stage")
+      .select("stage, introduced_at")
       .eq("id", id)
       .eq("client_id", client.id)
       .maybeSingle();
     priorStage = (prior?.stage as string | null) ?? null;
+
+    // Policy: block a NEW move into No Show / No Response once it's been more
+    // than 24h since introduction. Only a genuine transition INTO no_show is
+    // checked — an entry already at no_show, or any other stage move, is
+    // unaffected. Fail-open on a missing introduced_at.
+    if (
+      parsed.data.stage === NO_SHOW_STAGE &&
+      priorStage !== NO_SHOW_STAGE &&
+      !noShowMoveAllowed(prior?.introduced_at as string | null)
+    ) {
+      return NextResponse.json(
+        { error: NO_SHOW_WINDOW_MESSAGE },
+        { status: 422 },
+      );
+    }
   }
 
   const patch: Record<string, unknown> = { ...columnPatch, updated_at: new Date().toISOString() };
+
+  // A canonical stage move clears any custom-stage overlay (manage_stages only, so
+  // the column write never happens for real clients).
+  if (manageStages && parsed.data.stage !== undefined) {
+    patch.custom_stage_key = null;
+  }
 
   // Read-modify-write the overrides map when a custom-field patch is
   // present: load the current map, shallow-merge the patch on top
   // (patch wins), and include the merged result in the single UPDATE
   // below. Scoped by id + client_id so one client can never touch
   // another's entry.
-  if (customFieldsPatch && Object.keys(customFieldsPatch).length > 0) {
+  const hasCfPatch = customFieldsPatch && Object.keys(customFieldsPatch).length > 0;
+  const hasCfRemove = customFieldsRemove && customFieldsRemove.length > 0;
+  if (hasCfPatch || hasCfRemove) {
     const { data: cur } = await admin
       .from("client_pipeline_entries")
       .select("custom_fields_overrides")
       .eq("id", id)
       .eq("client_id", client.id)
       .maybeSingle();
-    const existing =
-      ((cur?.custom_fields_overrides as Record<string, unknown> | null) ?? {});
-    patch.custom_fields_overrides = { ...existing, ...customFieldsPatch };
+    const map: Record<string, unknown> = {
+      ...((cur?.custom_fields_overrides as Record<string, unknown> | null) ?? {}),
+    };
+    if (hasCfPatch) Object.assign(map, customFieldsPatch);
+    if (hasCfRemove) {
+      for (const k of customFieldsRemove) delete map[k];
+    }
+    patch.custom_fields_overrides = map;
   }
   const { data, error } = await admin
     .from("client_pipeline_entries")

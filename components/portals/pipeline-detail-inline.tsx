@@ -2,6 +2,7 @@
 
 import type { PipelineEntry } from "@/lib/portals/portal-data";
 import { cn } from "@/lib/utils";
+import { NO_SHOW_STAGE, noShowMoveAllowed } from "@/lib/portals/no-show-window";
 import {
   pickFirstString,
   pickProfileUrl,
@@ -9,6 +10,7 @@ import {
   AGENT_PROFILE_PREFERRED_KEYS,
   LICENSE_KEYS,
   YEARS_KEYS,
+  formatPortalFieldValue,
 } from "@/components/portals/custom-field-helpers";
 
 // Inline expandable detail block for a Recruiting Pipeline row.
@@ -174,7 +176,9 @@ export function PipelineDetailInline({
     if (shown.has(k.toLowerCase())) continue;
     if (CF_SKIP.has(k.toLowerCase())) continue;
     if (!hasValue(v)) continue;
-    fields.push({ label: prettyKey(k), value: String(v).trim() });
+    // Currency fields (Sales Volume / List-side / Buy-side) render as
+    // $XXX,XXX,XXX; every other field is stringified unchanged.
+    fields.push({ label: prettyKey(k), value: formatPortalFieldValue(k, v) });
   }
 
   const introducedDate = entry.introduced_at
@@ -226,6 +230,16 @@ export function PipelineDetailInline({
           )}
         >
           <FieldStack label="Introduced" value={introducedDate} compact={compact} />
+          {entry.stage !== NO_SHOW_STAGE &&
+          !noShowMoveAllowed(entry.introduced_at) ? (
+            <div className="flex items-start gap-1.5 text-[11.5px] text-[#9aa0ab]">
+              <span aria-hidden>⏱</span>
+              <span>
+                No Show / No Response window closed. It can only be set within 24
+                hours of introduction.
+              </span>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
