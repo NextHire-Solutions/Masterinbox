@@ -6,12 +6,10 @@ import { notifyIntroduction } from "@/lib/webhooks/n8n-introduction";
 import { notifyPortalStageChange } from "@/lib/webhooks/slack-portal";
 import { pushPipelineEntryToFub } from "@/lib/integrations/push-pipeline-entry";
 import { clientHasFeature } from "@/lib/portals/feature-flags";
-import { MANAGE_STAGES_FLAG } from "@/lib/portals/stage-config";
 import {
-  NO_SHOW_STAGE,
-  NO_SHOW_WINDOW_MESSAGE,
-  noShowMoveAllowed,
-} from "@/lib/portals/no-show-window";
+  MANAGE_STAGES_FLAG,
+  GLOBAL_CUSTOM_STAGE_KEYS,
+} from "@/lib/portals/stage-config";
 
 // PATCH /api/portal/[token]/pipeline/[id]
 // DELETE /api/portal/[token]/pipeline/[id]
@@ -115,15 +113,22 @@ export async function PATCH(
   // custom_stage_key is excluded from columnPatch above so it's never written for them.
   if (manageStages && customStageKey !== undefined) {
     if (customStageKey !== null) {
-      const { data: st } = await admin
-        .from("client_pipeline_stages")
-        .select("key")
-        .eq("client_id", client.id)
-        .eq("kind", "custom")
-        .eq("key", customStageKey)
-        .maybeSingle();
-      if (!st) {
-        return NextResponse.json({ error: "Unknown custom stage" }, { status: 400 });
+      // The two global "no show" stages are valid for every client without a
+      // stored row; any other custom key must exist in the client's own rows.
+      const isGlobal = (GLOBAL_CUSTOM_STAGE_KEYS as readonly string[]).includes(
+        customStageKey,
+      );
+      if (!isGlobal) {
+        const { data: st } = await admin
+          .from("client_pipeline_stages")
+          .select("key")
+          .eq("client_id", client.id)
+          .eq("kind", "custom")
+          .eq("key", customStageKey)
+          .maybeSingle();
+        if (!st) {
+          return NextResponse.json({ error: "Unknown custom stage" }, { status: 400 });
+        }
       }
     }
     const { error: cErr } = await admin
@@ -143,26 +148,11 @@ export async function PATCH(
   if (parsed.data.stage !== undefined) {
     const { data: prior } = await admin
       .from("client_pipeline_entries")
-      .select("stage, introduced_at")
+      .select("stage")
       .eq("id", id)
       .eq("client_id", client.id)
       .maybeSingle();
     priorStage = (prior?.stage as string | null) ?? null;
-
-    // Policy: block a NEW move into No Show / No Response once it's been more
-    // than 24h since introduction. Only a genuine transition INTO no_show is
-    // checked — an entry already at no_show, or any other stage move, is
-    // unaffected. Fail-open on a missing introduced_at.
-    if (
-      parsed.data.stage === NO_SHOW_STAGE &&
-      priorStage !== NO_SHOW_STAGE &&
-      !noShowMoveAllowed(prior?.introduced_at as string | null)
-    ) {
-      return NextResponse.json(
-        { error: NO_SHOW_WINDOW_MESSAGE },
-        { status: 422 },
-      );
-    }
   }
 
   const patch: Record<string, unknown> = { ...columnPatch, updated_at: new Date().toISOString() };

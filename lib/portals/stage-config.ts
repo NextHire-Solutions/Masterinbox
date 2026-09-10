@@ -116,25 +116,70 @@ export function seedRowsForClient(
   }));
 }
 
+// Two "no show" workflow stages every client gets IN ADDITION to their own
+// stages. They are display-only board buckets (placed via custom_stage_key, an
+// overlay), so they never touch the pipeline_stage enum, the funnel, or
+// reporting, and they carry no 24h window (that is only for No Response).
+// Editable/movable anytime. Keys are stable and global; the labels are the
+// defaults (a client can rename them through Manage Stages, which stores a row
+// that then wins via the de-dupe in resolveStageDefs).
+export const GLOBAL_CUSTOM_STAGE_KEYS = [
+  "phone_screen_no_show",
+  "interview_no_show",
+] as const;
+
+export function globalCustomStageDefs(): StageDef[] {
+  return [
+    {
+      key: "phone_screen_no_show",
+      label: "Phone screen no show",
+      color: "#0891b2",
+      kind: "custom",
+      canonicalStage: null,
+      hidden: false,
+    },
+    {
+      key: "interview_no_show",
+      label: "Interview no show",
+      color: "#db2777",
+      kind: "custom",
+      canonicalStage: null,
+      hidden: false,
+    },
+  ];
+}
+
+// Append the global stages, skipping any key a client already has (so a client
+// row with the same key wins and nothing is ever duplicated).
+function withGlobalCustomStages(defs: StageDef[]): StageDef[] {
+  const have = new Set(defs.map((d) => d.key));
+  return [...defs, ...globalCustomStageDefs().filter((g) => !have.has(g.key))];
+}
+
 // Resolve the client's effective stage list. When rows exist (feature in use) they win;
-// otherwise fall back to the canonical defaults. Ordered by sort_order.
+// otherwise fall back to the canonical defaults. Ordered by sort_order. The two
+// global "no show" stages are always appended (deduped by key).
 export function resolveStageDefs(
   client: StageClient,
   rows: ClientStageRow[] | null | undefined,
 ): StageDef[] {
-  if (!rows || rows.length === 0) return canonicalStageDefs(client);
-  return [...rows]
-    .sort((a, b) => a.sort_order - b.sort_order)
-    .map((r) => ({
-      key: r.key,
-      label: r.label,
-      color:
-        r.color ??
-        (r.canonical_stage
-          ? CANONICAL_STAGE_COLOR[r.canonical_stage]
-          : STAGE_COLOR_PALETTE[0]),
-      kind: r.kind,
-      canonicalStage: r.canonical_stage,
-      hidden: r.hidden,
-    }));
+  if (!rows || rows.length === 0) {
+    return withGlobalCustomStages(canonicalStageDefs(client));
+  }
+  return withGlobalCustomStages(
+    [...rows]
+      .sort((a, b) => a.sort_order - b.sort_order)
+      .map((r) => ({
+        key: r.key,
+        label: r.label,
+        color:
+          r.color ??
+          (r.canonical_stage
+            ? CANONICAL_STAGE_COLOR[r.canonical_stage]
+            : STAGE_COLOR_PALETTE[0]),
+        kind: r.kind,
+        canonicalStage: r.canonical_stage,
+        hidden: r.hidden,
+      })),
+  );
 }

@@ -184,12 +184,15 @@ export async function POST(request: Request) {
     insertRow.portal_token = `${slug}-${randomHex(10)}`;
     insertRow.portal_enabled = true;
     // Seed the standard portal feature flags a new client should launch
-    // with. Historically manage_stages (the "Manage stages" panel: add /
-    // edit / reorder / delete) was flipped on per-client during rollout, so
-    // portals created afterward came up with the legacy rename-only "Stage
-    // names" view. Seeding it here means every new portal gets the current
-    // stages functionality automatically.
-    insertRow.feature_flags = { manage_stages: true };
+    // with. Historically these were flipped on per-client during rollout, so
+    // portals created afterward came up missing them. Seeding here means every
+    // new portal gets the current functionality automatically:
+    //   • manage_stages       — the "Manage stages" panel (add/edit/reorder/hide)
+    //   • pipeline_kanban_view — the List ↔ Board (kanban) view toggle
+    insertRow.feature_flags = {
+      manage_stages: true,
+      pipeline_kanban_view: true,
+    };
   }
   // Widen the returned column set so the caller gets everything
   // they'll need to hit the portal endpoints next (token + URL) and

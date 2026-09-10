@@ -26,3 +26,23 @@ export function noShowMoveAllowed(
   if (!Number.isFinite(t)) return true;
   return now.getTime() - t <= WINDOW_MS;
 }
+
+// Milliseconds left in the No Show window; 0 once closed or when there is no
+// usable introduced_at (so no countdown is shown for a data gap).
+export function noShowMsRemaining(
+  introducedAt: string | null | undefined,
+  now: Date = new Date(),
+): number {
+  if (!introducedAt) return 0;
+  const t = new Date(introducedAt).getTime();
+  if (!Number.isFinite(t)) return 0;
+  return Math.max(0, t + WINDOW_MS - now.getTime());
+}
+
+// Human "Xh Ym" / "Ym" for a remaining-ms value (whole minutes).
+export function formatNoShowRemaining(ms: number): string {
+  const totalMin = Math.floor(ms / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}

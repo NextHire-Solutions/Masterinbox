@@ -86,11 +86,6 @@ import {
   type PipelineCsvRow,
 } from "@/lib/portals/csv";
 import { formatPhoneDisplay } from "@/lib/portals/phone";
-import {
-  NO_SHOW_STAGE,
-  NO_SHOW_WINDOW_MESSAGE,
-  noShowMoveAllowed,
-} from "@/lib/portals/no-show-window";
 
 // Stage → coloured chip. Tone matches the Google Sheets pipeline board:
 // saturated fill, white text — readable at a glance across a long table.
@@ -448,7 +443,6 @@ export function PipelineBoard({
     const ids = Array.from(selected);
     setEntries((cur) => cur.map((e) => (selected.has(e.id) ? { ...e, stage } : e)));
     setSelected(new Set());
-    let blocked = 0;
     for (let i = 0; i < ids.length; i += BULK_CHUNK) {
       const slice = ids.slice(i, i + BULK_CHUNK);
       const res = await fetch(`/api/portal/${token}/pipeline`, {
@@ -463,21 +457,9 @@ export function PipelineBoard({
         router.refresh();
         return;
       }
-      const j = await res.json().catch(() => ({}));
-      blocked += typeof j.noShowBlocked === "number" ? j.noShowBlocked : 0;
     }
     setBulkBusy(false);
-    if (blocked > 0) {
-      // Some entries were outside the 24h No Show window; the server skipped
-      // them. Refresh so those cards revert from the optimistic move.
-      router.refresh();
-      const moved = ids.length - blocked;
-      toast.info(
-        `Moved ${moved.toLocaleString()} to ${stageLabels[stage]}. ${blocked.toLocaleString()} skipped — ${NO_SHOW_WINDOW_MESSAGE}`,
-      );
-    } else {
-      toast.success(`Moved ${ids.length.toLocaleString()} to ${stageLabels[stage]}`);
-    }
+    toast.success(`Moved ${ids.length.toLocaleString()} to ${stageLabels[stage]}`);
   }
 
   // Per-row assignment mutation: optimistic local update + single
@@ -1555,14 +1537,7 @@ function PipelineRow({
       </div>
       <div className="text-[12.5px] text-[#5b6472]">{fmtDate(entry.introduced_at)}</div>
       <div className="flex flex-col items-start gap-1.5">
-        <StageSelector
-          value={entry.custom_stage_key ?? entry.stage}
-          onChange={onStage}
-          noShowLocked={
-            entry.stage !== NO_SHOW_STAGE &&
-            !noShowMoveAllowed(entry.introduced_at)
-          }
-        />
+        <StageSelector value={entry.custom_stage_key ?? entry.stage} onChange={onStage} />
         <AssignedSelector
           value={entry.assigned_team_member}
           members={teamMembers}
@@ -1727,14 +1702,7 @@ function PipelineMobileCard({
         </div>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <StageSelector
-          value={entry.custom_stage_key ?? entry.stage}
-          onChange={onStage}
-          noShowLocked={
-            entry.stage !== NO_SHOW_STAGE &&
-            !noShowMoveAllowed(entry.introduced_at)
-          }
-        />
+        <StageSelector value={entry.custom_stage_key ?? entry.stage} onChange={onStage} />
         <AssignedSelector
           value={entry.assigned_team_member}
           members={teamMembers}
@@ -1895,14 +1863,10 @@ function AssignedSelector({
 function StageSelector({
   value,
   onChange,
-  noShowLocked = false,
 }: {
   // Display key: a canonical enum value, or (manage_stages) a custom stage key.
   value: string;
   onChange: (s: string) => void;
-  // True once the 24h No Show window has closed for this entry — the No Show
-  // option is then shown disabled with a reason (the server enforces it too).
-  noShowLocked?: boolean;
 }) {
   const stageLabels = useStageLabels();
   // Per-client visible stages. If the current entry is in a stage hidden for this
@@ -1947,27 +1911,16 @@ function StageSelector({
         }
       />
       <DropdownMenuContent align="start" className="w-48">
-        {dropdownStages.map((s) => {
-          const locked = noShowLocked && s === NO_SHOW_STAGE;
-          return (
-            <DropdownMenuItem
-              key={s}
-              disabled={locked}
-              onClick={locked ? undefined : () => onChange(s)}
-              className="flex items-center justify-between gap-2"
-            >
-              <span className="flex flex-col">
-                <span className="text-[13px]">{labelOf(s)}</span>
-                {locked ? (
-                  <span className="text-[10.5px] text-[#9aa0ab]">
-                    Only within 24h of introduction
-                  </span>
-                ) : null}
-              </span>
-              {s === value ? <Check className="size-3.5 text-[#1565C0]" /> : null}
-            </DropdownMenuItem>
-          );
-        })}
+        {dropdownStages.map((s) => (
+          <DropdownMenuItem
+            key={s}
+            onClick={() => onChange(s)}
+            className="flex items-center justify-between gap-2"
+          >
+            <span className="text-[13px]">{labelOf(s)}</span>
+            {s === value ? <Check className="size-3.5 text-[#1565C0]" /> : null}
+          </DropdownMenuItem>
+        ))}
       </DropdownMenuContent>
     </DropdownMenu>
   );

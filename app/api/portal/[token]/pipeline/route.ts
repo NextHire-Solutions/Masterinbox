@@ -6,7 +6,6 @@ import { notifyIntroduction } from "@/lib/webhooks/n8n-introduction";
 import { notifyPortalStageChange } from "@/lib/webhooks/slack-portal";
 import { pushPipelineEntryToFub } from "@/lib/integrations/push-pipeline-entry";
 import { clientHasFeature } from "@/lib/portals/feature-flags";
-import { NO_SHOW_STAGE, noShowMoveAllowed } from "@/lib/portals/no-show-window";
 
 // POST /api/portal/[token]/pipeline — manually create a pipeline entry
 // from the client portal. Used when the client wants to log an intro
@@ -167,45 +166,17 @@ export async function PATCH(
       return NextResponse.json({ error: "stage required" }, { status: 400 });
     }
     const newStage = parsed.data.stage;
-    // Snapshot prior stages (+ introduced_at for the No Show window rule) on
-    // the affected rows so the Slack notification can show "from → to" per
-    // entry. Indexed read.
+    // Snapshot prior stages on the affected rows so the Slack
+    // notification can show "from → to" per entry. Indexed read.
     const { data: priorRows } = await admin
       .from("client_pipeline_entries")
-      .select("id, stage, introduced_at")
+      .select("id, stage")
       .eq("client_id", client.id)
       .in("id", parsed.data.ids);
     const priorStageById = new Map<string, string | null>();
-    const introducedById = new Map<string, string | null>();
-    for (const r of (priorRows ?? []) as Array<{
-      id: string;
-      stage: string | null;
-      introduced_at: string | null;
-    }>) {
+    for (const r of (priorRows ?? []) as Array<{ id: string; stage: string | null }>) {
       priorStageById.set(r.id, r.stage);
-      introducedById.set(r.id, r.introduced_at);
     }
-
-    // Policy: block a NEW move into No Show / No Response past the 24h window.
-    // Blocked entries drop out of this batch so the eligible ones still move;
-    // we report the count so the UI can tell the client. Foreign ids and rows
-    // already at no_show pass through untouched (fail-open on missing data).
-    let noShowBlocked = 0;
-    const targetIds =
-      newStage === NO_SHOW_STAGE
-        ? parsed.data.ids.filter((eid) => {
-            if (!priorStageById.has(eid)) return true; // foreign id — update ignores it anyway
-            if (priorStageById.get(eid) === NO_SHOW_STAGE) return true; // already there
-            if (noShowMoveAllowed(introducedById.get(eid))) return true;
-            noShowBlocked += 1;
-            return false;
-          })
-        : parsed.data.ids;
-
-    if (targetIds.length === 0) {
-      return NextResponse.json({ ok: true, updated: 0, noShowBlocked });
-    }
-
     // .select("id") so downstream notifications only cover rows that
     // actually belong to this client (foreign ids fall out of the
     // update silently).
@@ -213,7 +184,7 @@ export async function PATCH(
       .from("client_pipeline_entries")
       .update({ stage: newStage, updated_at: new Date().toISOString() })
       .eq("client_id", client.id)
-      .in("id", targetIds)
+      .in("id", parsed.data.ids)
       .select("id");
     if (error) return NextResponse.json({ error: error.message }, { status: 400 });
 
@@ -274,7 +245,7 @@ export async function PATCH(
       }
     }
 
-    return NextResponse.json({ ok: true, updated: updated?.length ?? 0, noShowBlocked });
+    return NextResponse.json({ ok: true });
   }
   if (parsed.data.action === "assign") {
     // null is a valid value — it clears the assignment. zod's

@@ -437,7 +437,7 @@ export const DEFAULT_STAGE_LABELS: Record<PipelineStage, string> = {
   hired: "Hired",
   keep_warm: "Nurture",
   we_they_rejected: "Not a Fit",
-  no_show: "No Show / No Response",
+  no_show: "No Response",
 };
 
 // Hard cap on a custom label length. Keeps the badges, dropdowns,

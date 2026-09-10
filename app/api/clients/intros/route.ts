@@ -118,11 +118,30 @@ export async function GET(request: Request) {
     return introsFromPipelineStage(admin, labelName);
   }
 
-  // Pull every assignment for this label. .range() alone does NOT
+  // "Interested" is a funnel STATE, not a terminal one: every Introduction
+  // was Interested first, but applying the Introduction label wipes the
+  // Interested label (single-label-per-thread — see the labels route). So an
+  // Interested query that only counts the live "Interested" label loses every
+  // lead the moment it's introduced. Union the Introduction label into the
+  // Interested query so the total reflects "ever showed interest". Other
+  // labels (Introduction itself, etc.) are unaffected — this branch is
+  // Interested-only.
+  const labelIds: string[] = [labelRow.id];
+  if (labelName.toLowerCase() === "interested") {
+    const { data: introRow } = await admin
+      .from("labels")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .ilike("name", "Introduction")
+      .maybeSingle();
+    if (introRow?.id && introRow.id !== labelRow.id) labelIds.push(introRow.id);
+  }
+
+  // Pull every assignment for these label(s). .range() alone does NOT
   // lift Supabase's server-side db-max-rows=1000 cap — the response
   // comes back capped no matter what range the client asks for. Page
   // in 1000-row windows via fetchAllRows. See lib/db/paginated-select.
-  const assignmentList = await fetchAllRows<{
+  const rawAssignmentList = await fetchAllRows<{
     assigned_at: string;
     target_id: string;
   }>(({ from, to }) =>
@@ -131,10 +150,21 @@ export async function GET(request: Request) {
       .select("assigned_at, target_id")
       .eq("workspace_id", workspaceId)
       .eq("target_type", "thread")
-      .eq("label_id", labelRow.id)
+      .in("label_id", labelIds)
       .order("assigned_at", { ascending: false })
       .range(from, to),
   );
+
+  // One row per thread. The list is ordered most-recent-first, so the first
+  // occurrence wins. With single-label-per-thread semantics a thread carries
+  // at most one of {Interested, Introduction} so there's normally nothing to
+  // collapse, but this defends against any thread that somehow holds both.
+  const seenThreads = new Set<string>();
+  const assignmentList = rawAssignmentList.filter((a) => {
+    if (seenThreads.has(a.target_id)) return false;
+    seenThreads.add(a.target_id);
+    return true;
+  });
 
   if (assignmentList.length === 0) {
     return NextResponse.json({

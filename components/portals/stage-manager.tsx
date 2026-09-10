@@ -22,6 +22,7 @@ import {
   type StageDef,
   STRUCTURAL_CANONICAL_STAGES,
   STAGE_COLOR_PALETTE,
+  GLOBAL_CUSTOM_STAGE_KEYS,
 } from "@/lib/portals/stage-config";
 
 // Manage Stages editor — Demo Portal only (gated by `manage_stages`; the board
@@ -33,6 +34,10 @@ import {
 // PATCH /api/portal/[token]/stages — never the enum, entries, or any webhook.
 
 const STRUCTURAL = new Set<string>(STRUCTURAL_CANONICAL_STAGES);
+// The two global "no show" stages are system-provided: they can be renamed /
+// reordered / hidden like any stage, but never deleted (they come back from
+// code on the next load anyway).
+const SYSTEM_CUSTOM = new Set<string>(GLOBAL_CUSTOM_STAGE_KEYS);
 
 type Row = {
   key: string;
@@ -97,7 +102,11 @@ export function StageManager({
     ]);
   }
   function deleteStage(i: number) {
-    setRows((cur) => (cur[i]?.kind === "custom" ? cur.filter((_, k) => k !== i) : cur));
+    setRows((cur) =>
+      cur[i]?.kind === "custom" && !SYSTEM_CUSTOM.has(cur[i].key)
+        ? cur.filter((_, k) => k !== i)
+        : cur,
+    );
   }
   // Custom-stage color: click the dot to cycle through the preset palette.
   function cycleColor(i: number) {
@@ -254,7 +263,7 @@ export function StageManager({
                       <Eye className="size-4" />
                     )}
                   </button>
-                  {r.kind === "custom" ? (
+                  {r.kind === "custom" && !SYSTEM_CUSTOM.has(r.key) ? (
                     <button
                       type="button"
                       onClick={() => deleteStage(i)}

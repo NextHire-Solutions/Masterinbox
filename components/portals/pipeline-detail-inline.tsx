@@ -1,8 +1,13 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import type { PipelineEntry } from "@/lib/portals/portal-data";
 import { cn } from "@/lib/utils";
-import { NO_SHOW_STAGE, noShowMoveAllowed } from "@/lib/portals/no-show-window";
+import {
+  NO_SHOW_STAGE,
+  noShowMsRemaining,
+  formatNoShowRemaining,
+} from "@/lib/portals/no-show-window";
 import {
   pickFirstString,
   pickProfileUrl,
@@ -230,16 +235,10 @@ export function PipelineDetailInline({
           )}
         >
           <FieldStack label="Introduced" value={introducedDate} compact={compact} />
-          {entry.stage !== NO_SHOW_STAGE &&
-          !noShowMoveAllowed(entry.introduced_at) ? (
-            <div className="flex items-start gap-1.5 text-[11.5px] text-[#9aa0ab]">
-              <span aria-hidden>⏱</span>
-              <span>
-                No Show / No Response window closed. It can only be set within 24
-                hours of introduction.
-              </span>
-            </div>
-          ) : null}
+          <NoShowWindowStatus
+            stage={entry.stage}
+            introducedAt={entry.introduced_at}
+          />
         </div>
       ) : null}
 
@@ -268,6 +267,52 @@ export function PipelineDetailInline({
           </ul>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// The 24h No Response window on a candidate. No Response can be set at any
+// time; this is a colour indicator only: a GREEN live countdown while the
+// candidate is still within 24h of introduction (the replacement-eligible
+// window), turning RED once that window has passed. Renders nothing for a
+// candidate already at No Response or with no usable introduced_at.
+function NoShowWindowStatus({
+  stage,
+  introducedAt,
+}: {
+  stage: string;
+  introducedAt: string | null;
+}) {
+  // Tick every 30s so the countdown stays fresh without churning. This detail
+  // drawer only mounts when a row is expanded, so the timer runs only for the
+  // open card.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  if (stage === NO_SHOW_STAGE || !introducedAt) return null;
+  const remaining = noShowMsRemaining(introducedAt, new Date(now));
+
+  // Within 24h → green countdown (still replacement-eligible).
+  if (remaining > 0) {
+    return (
+      <div className="flex items-start gap-1.5 text-[11.5px] text-emerald-600">
+        <span aria-hidden>⏱</span>
+        <span>
+          <span className="font-semibold">{formatNoShowRemaining(remaining)}</span>{" "}
+          left to mark No Response (24 hour window).
+        </span>
+      </div>
+    );
+  }
+
+  // Past 24h → red marker. No Response can still be set; the window has passed.
+  return (
+    <div className="flex items-start gap-1.5 text-[11.5px] text-red-500">
+      <span aria-hidden>⏱</span>
+      <span>24 hour No Response window has passed.</span>
     </div>
   );
 }
