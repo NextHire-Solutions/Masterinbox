@@ -1,0 +1,14 @@
+{
+  "name": "loopmessage-notifier",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Receives lead.introduction webhooks from Masterinbox and texts the client's team via LoopMessage.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node test/run-tests.mjs"
+  }
+}
