@@ -7,7 +7,13 @@
 
 import assert from "node:assert/strict";
 import { normalizePhone } from "../src/phone.js";
-import { DedupeStore, buildText, planNotifications, processIntroduction } from "../src/notify.js";
+import {
+  DedupeStore,
+  buildText,
+  parseClientList,
+  planNotifications,
+  processIntroduction,
+} from "../src/notify.js";
 import { sendMessage } from "../src/loopmessage.js";
 
 let passed = 0;
@@ -299,6 +305,127 @@ await test("dry run plans without calling the API", async () => {
   });
   assert.equal(f.calls.length, 0);
   assert.deepEqual(res.results.map((r) => r.status), ["dry_run", "dry_run"]);
+});
+
+console.log("\nclient rollout (NOTIFY_CLIENTS / TEST_RECIPIENT_OVERRIDE)");
+
+const DEMO = {
+  ...PINNED,
+  pipeline_entry_id: "demo-entry-1",
+  client: { id: "11111111-2222-3333-4444-555555555555", name: "Demo Portal" },
+  team: [
+    { name: "Other Agent", mobile: "9733966766" },
+    { name: "Demo Tester", mobile: "718-415-0537" },
+  ],
+};
+const quietLogger = { log() {}, warn() {}, error() {} };
+
+await test("client list matches by name case-insensitively and by id", () => {
+  const f = parseClientList(" demo portal , 11111111-2222-3333-4444-555555555555");
+  assert.equal(f.matches({ name: "Demo Portal" }), true);
+  assert.equal(f.matches({ id: "11111111-2222-3333-4444-555555555555", name: "Renamed" }), true);
+  assert.equal(f.matches({ id: "x", name: "Douglas Elliman" }), false);
+});
+
+await test("'*' enables every client", () => {
+  assert.equal(parseClientList("*").matches({ name: "Anyone" }), true);
+});
+
+await test("empty or unset list enables nobody (fails closed)", () => {
+  for (const raw of [undefined, null, "", " , "]) {
+    const f = parseClientList(raw);
+    assert.equal(f.matches({ id: "a", name: "Demo Portal" }), false, `raw=${raw}`);
+  }
+});
+
+await test("a client that isn't enabled plans no recipients", () => {
+  const plan = planNotifications(PINNED, { clientFilter: parseClientList("Demo Portal") });
+  assert.equal(plan.ok, true);
+  assert.equal(plan.ignored, "client_not_enabled");
+  assert.equal(plan.recipients.length, 0);
+});
+
+await test("a client that isn't enabled makes zero LoopMessage calls", async () => {
+  const f = stubFetch([{ status: 200, body: { success: true } }]);
+  const res = await processIntroduction(PINNED, {
+    apiKey: "k", dedupe: new DedupeStore(), logger: quietLogger, fetchImpl: f,
+    clientFilter: parseClientList("Demo Portal"),
+  });
+  assert.equal(f.calls.length, 0);
+  assert.equal(res.ignored, "client_not_enabled");
+  assert.equal(res.client, "Douglas Elliman");
+});
+
+await test("override sends exactly one text to the override number, not the team", async () => {
+  const f = stubFetch([{ status: 200, body: { success: true, message_id: "M" } }]);
+  const res = await processIntroduction(DEMO, {
+    apiKey: "k", dedupe: new DedupeStore(), logger: quietLogger, fetchImpl: f,
+    clientFilter: parseClientList("Demo Portal"),
+    testRecipientOverride: "+17184150537",
+  });
+  assert.equal(f.calls.length, 1, "one text per lead, whatever the team size");
+  assert.equal(f.calls[0].body.contact, "+17184150537");
+  assert.equal(res.testOverride, true);
+});
+
+await test("override greets the team member who owns that number", () => {
+  const plan = planNotifications(DEMO, {
+    clientFilter: parseClientList("Demo Portal"),
+    testRecipientOverride: "+17184150537",
+  });
+  assert.equal(plan.recipients[0].name, "Demo Tester");
+  assert.ok(plan.recipients[0].text.startsWith("Hi Demo Tester,"));
+});
+
+await test("override falls back to the first named member, then 'there'", () => {
+  const noOwner = { ...DEMO, team: [{ name: "Other Agent", mobile: "9733966766" }] };
+  assert.equal(
+    planNotifications(noOwner, { testRecipientOverride: "+17184150537" }).recipients[0].name,
+    "Other Agent",
+  );
+  const noTeam = { ...DEMO, team: [] };
+  const plan = planNotifications(noTeam, { testRecipientOverride: "+17184150537" });
+  assert.equal(plan.recipients.length, 1, "still sends when the team is empty");
+  assert.ok(plan.recipients[0].text.startsWith("Hi there,"));
+});
+
+await test("replayed override event does not double-text the test number", async () => {
+  const f = stubFetch([{ status: 200, body: { success: true, message_id: "M" } }]);
+  const deps = {
+    apiKey: "k", dedupe: new DedupeStore(), logger: quietLogger, fetchImpl: f,
+    clientFilter: parseClientList("Demo Portal"), testRecipientOverride: "+17184150537",
+  };
+  await processIntroduction(DEMO, deps);
+  const second = await processIntroduction(DEMO, deps);
+  assert.equal(f.calls.length, 1);
+  assert.equal(second.results[0].status, "duplicate_suppressed");
+});
+
+await test("a different lead for the same client still texts the test number", async () => {
+  const f = stubFetch([{ status: 200, body: { success: true, message_id: "M" } }]);
+  const deps = {
+    apiKey: "k", dedupe: new DedupeStore(), logger: quietLogger, fetchImpl: f,
+    clientFilter: parseClientList("Demo Portal"), testRecipientOverride: "+17184150537",
+  };
+  await processIntroduction(DEMO, deps);
+  await processIntroduction({ ...DEMO, pipeline_entry_id: "demo-entry-2" }, deps);
+  assert.equal(f.calls.length, 2);
+});
+
+await test("a dry run does not block the real send that follows", async () => {
+  // Regression: dry run used to claim the dedupe key, suppressing the real
+  // delivery of that lead for the full TTL.
+  const shared = new DedupeStore();
+  const f = stubFetch([{ status: 200, body: { success: true, message_id: "M" } }]);
+  const deps = { apiKey: "k", dedupe: shared, logger: quietLogger, fetchImpl: f };
+  await processIntroduction(PINNED, { ...deps, dryRun: true });
+  const real = await processIntroduction(PINNED, deps);
+  assert.deepEqual(real.results.map((r) => r.status), ["queued", "queued"]);
+});
+
+await test("an invalid override number is refused, not sent", () => {
+  const plan = planNotifications(DEMO, { testRecipientOverride: "not-a-number" });
+  assert.equal(plan.ok, false);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

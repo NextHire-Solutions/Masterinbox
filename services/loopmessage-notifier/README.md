@@ -48,7 +48,40 @@ compared in constant time.
 Add `&wait=1` to block on the sends and get per-recipient results back —
 useful for testing, not for the production caller.
 
+## Rollout controls
+
+Two variables decide who actually gets texted. Both are read at startup,
+so changing them on Railway redeploys the service.
+
+| Variable | Effect |
+|---|---|
+| `NOTIFY_CLIENTS` | Client names or ids, comma-separated, case-insensitive. `*` enables every client. **Empty enables nobody**, so a missing variable can't text the whole install. |
+| `TEST_RECIPIENT_OVERRIDE` | While set, each enabled lead sends exactly **one** text to this number instead of the team. The greeting uses the team member who owns that number if they're on the team. |
+
+Events for clients that aren't enabled are acknowledged and logged as
+`client_not_enabled` with the client's name **and id**. If a client name
+doesn't match what you expect, copy the id from that log line.
+
+Typical sequence:
+
+```
+1. client-side test   NOTIFY_CLIENTS="Demo Portal"   TEST_RECIPIENT_OVERRIDE="+1…"
+2. real team, one     NOTIFY_CLIENTS="Demo Portal"   (override removed)
+3. full rollout       NOTIFY_CLIENTS="*"
+```
+
+To check a live config without texting anyone, add `&dry_run=1` to a
+`wait=1` request. It returns the recipients that *would* be texted.
+`/health` shows how many clients are enabled and whether the override is on.
+
 ## Behaviour worth knowing
+
+- **Opt-out footer.** LoopMessage appended `To opt-out reply: stop` to the
+  message sent to a US number, but not to one sent to an Indian number.
+  The service doesn't add it and can't remove it.
+- **Sender must be the name, not the id.** `sender-name-list` returns an
+  `id` that the send endpoint rejects (code 220). `LOOPMESSAGE_SENDER_ID`
+  must hold the sender's name, e.g. `+19453926102`.
 
 - **A `200` from LoopMessage means queued, not delivered.** Confirm with
   `GET /message-status/{id}/`. The service logs the `message_id` for this.

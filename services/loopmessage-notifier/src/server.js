@@ -15,8 +15,9 @@
 
 import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { DedupeStore, processIntroduction } from "./notify.js";
+import { DedupeStore, parseClientList, processIntroduction } from "./notify.js";
 import { DEFAULT_BASE_URL, listSenders } from "./loopmessage.js";
+import { normalizePhone } from "./phone.js";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const API_KEY = process.env.LOOPMESSAGE_API_KEY;
@@ -26,6 +27,8 @@ const BASE_URL = process.env.LOOPMESSAGE_BASE_URL ?? DEFAULT_BASE_URL;
 const WEBHOOK_TOKEN = process.env.INTRO_WEBHOOK_TOKEN;
 const DEFAULT_COUNTRY_CODE = process.env.DEFAULT_COUNTRY_CODE ?? "1";
 const DRY_RUN = process.env.DRY_RUN === "1";
+const CLIENT_FILTER = parseClientList(process.env.NOTIFY_CLIENTS);
+const TEST_RECIPIENT_OVERRIDE = process.env.TEST_RECIPIENT_OVERRIDE?.trim() || null;
 const MAX_BODY_BYTES = 1_000_000;
 
 const missing = [];
@@ -36,6 +39,31 @@ if (missing.length > 0) {
     JSON.stringify({ level: "fatal", msg: "missing_env", vars: missing }),
   );
   process.exit(1);
+}
+
+// A typo here would otherwise surface only as a failed test text.
+if (
+  TEST_RECIPIENT_OVERRIDE &&
+  !normalizePhone(TEST_RECIPIENT_OVERRIDE, { defaultCountryCode: DEFAULT_COUNTRY_CODE }).ok
+) {
+  console.error(
+    JSON.stringify({
+      level: "fatal",
+      msg: "invalid_env",
+      var: "TEST_RECIPIENT_OVERRIDE",
+    }),
+  );
+  process.exit(1);
+}
+
+if (!CLIENT_FILTER.all && CLIENT_FILTER.size === 0) {
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      msg: "no_clients_enabled",
+      detail: "NOTIFY_CLIENTS is empty; every event will be skipped",
+    }),
+  );
 }
 
 const dedupe = new DedupeStore();
@@ -109,8 +137,11 @@ async function handleIntroduction(req, res, url) {
     sender: SENDER,
     channel: CHANNEL,
     defaultCountryCode: DEFAULT_COUNTRY_CODE,
+    clientFilter: CLIENT_FILTER,
+    testRecipientOverride: TEST_RECIPIENT_OVERRIDE,
     dedupe,
-    dryRun: DRY_RUN,
+    // Per-request dry run, so a live config can be checked without texting.
+    dryRun: DRY_RUN || url.searchParams.get("dry_run") === "1",
   };
 
   // ?wait=1 blocks on the sends and returns per-recipient results.
@@ -141,6 +172,9 @@ const server = http.createServer(async (req, res) => {
         service: "loopmessage-notifier",
         sender_configured: Boolean(SENDER),
         dry_run: DRY_RUN,
+        // Counts only: this route is unauthenticated.
+        clients_enabled: CLIENT_FILTER.all ? "all" : CLIENT_FILTER.size,
+        test_recipient_override: Boolean(TEST_RECIPIENT_OVERRIDE),
       });
     }
 
@@ -181,6 +215,8 @@ server.listen(PORT, () => {
       base_url: BASE_URL,
       sender_configured: Boolean(SENDER),
       dry_run: DRY_RUN,
+      clients_enabled: CLIENT_FILTER.all ? "all" : CLIENT_FILTER.size,
+      test_recipient_override: Boolean(TEST_RECIPIENT_OVERRIDE),
     }),
   );
 });

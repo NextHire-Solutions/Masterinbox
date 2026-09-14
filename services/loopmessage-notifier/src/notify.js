@@ -45,6 +45,31 @@ export class DedupeStore {
   }
 }
 
+// Which clients may be notified, from NOTIFY_CLIENTS.
+//
+// Entries are client names or client ids, comma-separated, matched
+// case-insensitively. "*" enables every client. An empty list enables
+// none: rollout is opt-in per client, so a missing variable must fail
+// closed rather than text every agent in the install.
+export function parseClientList(raw) {
+  const entries = String(raw ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const all = entries.includes("*");
+  const allowed = new Set(entries.filter((e) => e !== "*"));
+  return {
+    all,
+    size: allowed.size,
+    matches(client) {
+      if (all) return true;
+      const id = client?.id ? String(client.id).trim().toLowerCase() : "";
+      const name = client?.name ? String(client.name).trim().toLowerCase() : "";
+      return (id !== "" && allowed.has(id)) || (name !== "" && allowed.has(name));
+    },
+  };
+}
+
 // Mirrors the copy the n8n Twilio node was sending, minus the stray
 // trailing spaces. Fields that are null upstream are omitted rather than
 // rendered as "null" — portal-added leads often have no company.
@@ -65,7 +90,10 @@ export function buildText(teamMemberName, lead = {}) {
  * process() so the server can reject a malformed payload synchronously and
  * still hand back a useful reason.
  */
-export function planNotifications(payload, { defaultCountryCode = "1" } = {}) {
+export function planNotifications(
+  payload,
+  { defaultCountryCode = "1", clientFilter = null, testRecipientOverride = null } = {},
+) {
   if (!payload || typeof payload !== "object") {
     return { ok: false, reason: "body_not_an_object" };
   }
@@ -81,6 +109,46 @@ export function planNotifications(payload, { defaultCountryCode = "1" } = {}) {
   const team = Array.isArray(payload.team) ? payload.team : [];
   const lead = payload.lead ?? {};
   const client = payload.client ?? {};
+
+  const base = {
+    ok: true,
+    entryId,
+    clientId: client?.id ?? null,
+    clientName: client?.name ?? null,
+    source: payload.source ?? null,
+  };
+
+  if (clientFilter && !clientFilter.matches(client)) {
+    return { ...base, ignored: "client_not_enabled", recipients: [], skipped: [] };
+  }
+
+  // Test mode: one text per lead, to the override number only, whatever
+  // the team looks like. Greets the team member who owns that number when
+  // they're on the team, so the test text reads like the real one.
+  if (testRecipientOverride) {
+    const normalized = normalizePhone(testRecipientOverride, { defaultCountryCode });
+    if (!normalized.ok) {
+      return { ok: false, reason: `invalid_test_recipient_override_${normalized.reason}` };
+    }
+    const owner =
+      team.find(
+        (m) => normalizePhone(m?.mobile, { defaultCountryCode }).e164 === normalized.e164,
+      ) ?? team.find((m) => m?.name);
+    const name = owner?.name ?? null;
+    return {
+      ...base,
+      testOverride: true,
+      recipients: [
+        {
+          name,
+          mobile: testRecipientOverride,
+          contact: normalized.e164,
+          text: buildText(name, lead),
+        },
+      ],
+      skipped: [],
+    };
+  }
 
   const recipients = [];
   const skipped = [];
@@ -100,15 +168,7 @@ export function planNotifications(payload, { defaultCountryCode = "1" } = {}) {
     });
   }
 
-  return {
-    ok: true,
-    entryId,
-    clientId: client?.id ?? null,
-    clientName: client?.name ?? null,
-    source: payload.source ?? null,
-    recipients,
-    skipped,
-  };
+  return { ...base, recipients, skipped };
 }
 
 /**
@@ -122,14 +182,43 @@ export async function processIntroduction(payload, deps) {
     sender,
     channel,
     defaultCountryCode = "1",
+    clientFilter = null,
+    testRecipientOverride = null,
     dedupe,
     logger = console,
     dryRun = false,
     fetchImpl = fetch,
   } = deps;
 
-  const plan = planNotifications(payload, { defaultCountryCode });
+  const plan = planNotifications(payload, {
+    defaultCountryCode,
+    clientFilter,
+    testRecipientOverride,
+  });
   if (!plan.ok) return { ok: false, reason: plan.reason };
+
+  if (plan.ignored) {
+    // Logged with id as well as name so the exact value to put in
+    // NOTIFY_CLIENTS can be copied straight from the logs.
+    logger.log(
+      JSON.stringify({
+        level: "info",
+        msg: "client_not_enabled",
+        entry_id: plan.entryId,
+        client: plan.clientName,
+        client_id: plan.clientId,
+        source: plan.source,
+      }),
+    );
+    return {
+      ok: true,
+      ignored: plan.ignored,
+      entryId: plan.entryId,
+      client: plan.clientName,
+      clientId: plan.clientId,
+      results: [],
+    };
+  }
 
   for (const skip of plan.skipped) {
     logger.warn(
@@ -153,6 +242,13 @@ export async function processIntroduction(payload, deps) {
 
   const results = await Promise.all(
     plan.recipients.map(async (recipient) => {
+      // Before the dedupe claim: a dry run must not reserve the key, or
+      // the real delivery of the same lead would be suppressed for the
+      // whole TTL.
+      if (dryRun) {
+        return { ...recipient, status: "dry_run" };
+      }
+
       const key = `${plan.entryId}:${recipient.contact}`;
       if (dedupe && !dedupe.claim(key)) {
         logger.log(
@@ -165,10 +261,6 @@ export async function processIntroduction(payload, deps) {
           }),
         );
         return { ...recipient, status: "duplicate_suppressed" };
-      }
-
-      if (dryRun) {
-        return { ...recipient, status: "dry_run" };
       }
 
       const sent = await sendMessage({
@@ -220,6 +312,7 @@ export async function processIntroduction(payload, deps) {
     ok: true,
     entryId: plan.entryId,
     client: plan.clientName,
+    testOverride: Boolean(plan.testOverride),
     skipped: plan.skipped,
     results: results.map(({ text, ...rest }) => rest),
   };
