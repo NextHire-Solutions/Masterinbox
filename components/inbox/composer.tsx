@@ -10,6 +10,7 @@ import {
   Paperclip,
   Image as ImageIcon,
   Sparkles,
+  UserPlus,
   Mail,
   File as FileIcon,
   FileText,
@@ -25,10 +26,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import {
+  missingVariables,
   substituteVariables,
   type SubstitutionContext,
 } from "@/lib/inbox/template-variables";
 import { mergeAlwaysCcString } from "@/lib/inbox/auto-cc";
+import { introWasSent } from "@/lib/inbox/intro-send-guard";
 import {
   ComposerBodyEditor,
   type ComposerBodyHandle,
@@ -466,6 +469,155 @@ export function Composer({
     setSavingState("idle");
   }
 
+  /*
+   * The Introduce button's readiness, asked for once when the composer opens.
+   *
+   * Up front rather than on click, so the button can say WHY it is unavailable
+   * instead of looking broken when pressed. One indexed lookup per composer
+   * open, and only in reply mode: an introduction is a reply, never a forward.
+   */
+  const [introMacro, setIntroMacro] = useState<IntroMacroState>(null);
+  /*
+   * The text the Introduce button last inserted, held so the send can check
+   * the introduction is still in the body before it tags the thread. A ref
+   * rather than state: nothing renders from it, and it must not re-run the
+   * editor's effects mid-draft.
+   */
+  const introInsertedRef = useRef<string | null>(null);
+  /*
+   * Values the introduction asked for and the lead does not have.
+   *
+   * Substitution turns an unknown value into nothing, so a lead with no
+   * brokerage produced "is currently with ." and nothing said so. Held in
+   * state rather than shouted once in a toast: a toast is gone in four
+   * seconds and this needs to still be on screen when the operator reaches
+   * for Send.
+   */
+  const [introGaps, setIntroGaps] = useState<string[]>([]);
+  const [introducing, setIntroducing] = useState(false);
+
+  useEffect(() => {
+    if (mode !== "reply") return;
+    let cancelled = false;
+    void fetch(`/api/threads/${threadId}/intro-macro`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (!cancelled && j && typeof j.available === "boolean") setIntroMacro(j as IntroMacroState);
+      })
+      .catch(() => {
+        /* the button stays disabled with its "checking" title — no toast for
+           something the user did not ask for */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [threadId, mode]);
+
+  function insertIntroduction() {
+    if (!introMacro?.available || introducing) return;
+    setIntroducing(true);
+    try {
+      // The same substitution the Templates picker performs, so an
+      // introduction put in by this button and one chosen from the picker read
+      // identically.
+      const resolved = substituteVariables(introMacro.body, {
+        lead: {
+          name: toName ?? null,
+          email: toEmail,
+          phone: leadPhone,
+          company: leadCompany,
+          title: leadTitle,
+        },
+        thread: { subject: composerSubject },
+        sender: { name: fromName ?? null, email: fromEmail ?? null },
+      });
+      /*
+       * The introduction REPLACES the draft rather than joining it.
+       *
+       * It used to insert at the caret, like a template. But the composer
+       * opens with the reply agent's draft already in it, so pressing
+       * Introduce left the agent's sign-off sitting underneath the
+       * introduction — two different replies in one email. An introduction is
+       * the whole message, never a paragraph added to another one.
+       *
+       * The toast says when something was replaced, so nobody loses work
+       * silently, and the editor's own undo still brings it back.
+       */
+      const hadDraft = bodyText.trim().length > 0;
+      editorRef.current?.setContent(plainTextToHtml(resolved));
+      introInsertedRef.current = resolved;
+
+      // What the lead does not have, worked out from the macro BEFORE
+      // substitution emptied the gaps.
+      setIntroGaps(
+        missingVariables(introMacro.body, {
+          lead: {
+            name: toName ?? null,
+            email: toEmail,
+            phone: leadPhone,
+            company: leadCompany,
+            title: leadTitle,
+          },
+          thread: { subject: composerSubject },
+          sender: { name: fromName ?? null, email: fromEmail ?? null },
+        }),
+      );
+      const introCc = introMacro.cc;
+      if (introCc) {
+        // Merge, never replace — what is already in Cc stays.
+        setCc((cur) => mergeRecipientStrings(cur, introCc));
+        setShowCc(true);
+      }
+      toast.success(
+        [
+          `Introduction to ${introMacro.clientName}`,
+          hadDraft ? "replaced the draft" : "added",
+          introCc ? `· ${introCc} copied in` : "",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      );
+    } finally {
+      setIntroducing(false);
+    }
+  }
+
+  /*
+   * Tag the thread "Introduction" — after the send, never on the click.
+   *
+   * Applying that label is not bookkeeping. It messages the client, posts to
+   * Slack, opens a portal pipeline entry and pushes it to Follow Up Boss. The
+   * Introduce button only DRAFTS, so labelling when it is pressed would
+   * announce an introduction that has not been sent, and that the operator may
+   * still abandon. Labelling once the reply is actually gone tells everyone the
+   * truth, and asks the operator for nothing.
+   *
+   * Silent when the workspace has no Introduction label, and silent when the
+   * body no longer carries what the button inserted.
+   */
+  async function applyIntroductionLabelIfSent(sentBody: string): Promise<boolean> {
+    const inserted = introInsertedRef.current;
+    introInsertedRef.current = null;
+    if (!inserted) return false;
+    if (!introMacro?.available || !introMacro.introductionLabelId) return false;
+    if (!introWasSent(inserted, sentBody)) return false;
+    try {
+      const res = await fetch(`/api/threads/${threadId}/labels`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label_id: introMacro.introductionLabelId }),
+      });
+      if (!res.ok) throw new Error(`labels ${res.status}`);
+      return true;
+    } catch (err) {
+      // The email has already gone. A label that would not stick is a note to
+      // the operator, not a failed send.
+      console.error("[composer] introduction label failed:", err);
+      toast.error("Sent — but the Introduction label didn't stick. Add it from the inbox.");
+      return false;
+    }
+  }
+
   async function generateAiReply() {
     if (generating) return;
     setGenerating(true);
@@ -630,7 +782,8 @@ export function Composer({
       sentDuringThisLifetimeRef.current = true;
       lastSavedKeyRef.current = null;
       latestPayloadRef.current = null;
-      toast.success("Reply sent");
+      const tagged = await applyIntroductionLabelIfSent(bodyText);
+      toast.success(tagged ? "Introduction sent · thread tagged Introduction" : "Reply sent");
       router.refresh();
       onClose();
     } catch {
@@ -876,6 +1029,35 @@ export function Composer({
         }}
       />
 
+      {/*
+        What the introduction could not fill in.
+        ------------------------------------------------------------------
+        A lead with no brokerage on file produced "and is currently with ."
+        and nothing anywhere said so. This sits above Send, stays until the
+        gap is dealt with, and names each missing value in the words someone
+        would use for it. Dismissable, because the operator may well decide
+        the sentence still reads fine.
+      */}
+      {introGaps.length > 0 ? (
+        <div
+          role="status"
+          className="mx-4 mb-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-900 dark:text-amber-200 flex items-start gap-2 shrink-0"
+        >
+          <span className="flex-1">
+            The introduction has gaps: {joinMissing(introGaps)}{" "}
+            {introGaps.length === 1 ? "is" : "are"} missing. Read it before sending.
+          </span>
+          <button
+            type="button"
+            onClick={() => setIntroGaps([])}
+            aria-label="Dismiss the missing-details warning"
+            className="shrink-0 rounded px-1 opacity-70 hover:opacity-100"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      ) : null}
+
       {/* Footer toolbar + Send */}
       <div className="px-4 py-3 border-t flex items-center justify-between shrink-0">
         <div className="flex items-center gap-0.5 text-muted-foreground">
@@ -908,6 +1090,29 @@ export function Composer({
             )}
             {generating ? "Generating…" : "AI reply"}
           </button>
+          {mode === "reply" ? (
+            <button
+              type="button"
+              onClick={insertIntroduction}
+              disabled={!introMacro?.available || introducing}
+              aria-label="Insert the introduction"
+              title={
+                introMacro === null
+                  ? "Checking this client's introduction details…"
+                  : introMacro.available
+                    ? `Introduce this agent to ${introMacro.clientName}` +
+                      (introMacro.cc ? ` and copy in ${introMacro.cc}` : "") +
+                      (introMacro.introductionLabelId
+                        ? " · tags the thread Introduction once you send"
+                        : "")
+                    : introMacro.reason
+              }
+              className="h-8 px-2 inline-flex items-center gap-1.5 rounded-md border bg-background text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              <UserPlus className="size-3.5" />
+              Introduce
+            </button>
+          ) : null}
           <TemplatePicker
             substitutionContext={{
               lead: {
@@ -1095,6 +1300,18 @@ function parseRecipients(
 // Merge two CC/BCC strings, dedup case-insensitively, preserve order.
 // Used when a template carries its own CC/BCC and we don't want to
 // clobber whatever the user already typed manually.
+/** What GET /api/threads/<id>/intro-macro answers with. Null until it has. */
+type IntroMacroState =
+  | {
+      available: true;
+      clientName: string;
+      body: string;
+      cc: string | null;
+      introductionLabelId: string | null;
+    }
+  | { available: false; reason: string; clientName?: string }
+  | null;
+
 function mergeRecipientStrings(existing: string, incoming: string): string {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -1525,4 +1742,16 @@ function SenderPicker({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+/**
+ * "a", "a and b", "a, b and c" — for the missing-details warning.
+ *
+ * The first version read "This lead has no the lead's name", because it pasted
+ * owner-qualified labels into a sentence that already supplied the owner. The
+ * labels carry their own owner now, so the sentence must not.
+ */
+function joinMissing(parts: string[]): string {
+  if (parts.length <= 1) return parts[0] ?? "";
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }

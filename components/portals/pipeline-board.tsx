@@ -239,7 +239,9 @@ export function PipelineBoard({
   useEffect(() => setEntries(initial), [initial]);
 
   const [search, setSearch] = useState("");
-  const [stageFilter, setStageFilter] = useState<Set<PipelineStage>>(new Set());
+  // Holds display keys — a canonical stage OR a custom_stage_key — so custom
+  // stages get filter bubbles too.
+  const [stageFilter, setStageFilter] = useState<Set<string>>(new Set());
   const [replaceOnly, setReplaceOnly] = useState(false);
   const [openNotes, setOpenNotes] = useState<PipelineEntry | null>(null);
   const [openConversation, setOpenConversation] = useState<PipelineEntry | null>(null);
@@ -282,7 +284,8 @@ export function PipelineBoard({
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return entries.filter((e) => {
-      if (stageFilter.size > 0 && !stageFilter.has(e.stage)) return false;
+      if (stageFilter.size > 0 && !stageFilter.has(e.custom_stage_key ?? e.stage))
+        return false;
       if (replaceOnly && e.stage !== "no_show") return false;
       if (q) {
         const hay = [e.lead_name, e.lead_email, e.current_brokerage, e.lead_phone]
@@ -304,22 +307,42 @@ export function PipelineBoard({
     return filtered.slice(start, start + PORTAL_PAGE_SIZE);
   }, [filtered, page]);
 
-  // Per-stage counts for the filter chips.
+  // Per-display-stage counts for the filter chips, keyed by the SAME display
+  // key the board groups by (custom_stage_key ?? stage), so a candidate parked
+  // in a custom stage is counted under that custom stage, not its enum stage.
   const stageCounts = useMemo(() => {
-    const m: Record<PipelineStage, number> = {
-      introduction: 0,
-      phone_screen_scheduled: 0,
-      phone_screen: 0,
-      interview_scheduled: 0,
-      interview: 0,
-      hired: 0,
-      keep_warm: 0,
-      we_they_rejected: 0,
-      no_show: 0,
-    };
-    for (const e of entries) m[e.stage] += 1;
+    const m: Record<string, number> = {};
+    for (const e of entries) {
+      const k = e.custom_stage_key ?? e.stage;
+      m[k] = (m[k] ?? 0) + 1;
+    }
     return m;
   }, [entries]);
+
+  // The stages that get a filter bubble: the full manage_stages list (canonical
+  // + custom, non-hidden) when available, else the canonical visible set. This
+  // is what surfaces custom stages as filter bubbles. Colour is a hex for custom
+  // stages (applied inline) and a Tailwind class for canonical ones.
+  const filterStages = useMemo<
+    Array<{ key: string; label: string; hex: string | null; canonical: boolean }>
+  >(() => {
+    if (manageStagesEnabled && manageStages && manageStages.length > 0) {
+      return manageStages
+        .filter((d) => !d.hidden)
+        .map((d) => ({
+          key: d.key,
+          label: d.label,
+          hex: d.kind === "custom" ? d.color : null,
+          canonical: d.kind === "canonical",
+        }));
+    }
+    return visibleStages.map((s) => ({
+      key: s,
+      label: stageLabels[s],
+      hex: null,
+      canonical: true,
+    }));
+  }, [manageStagesEnabled, manageStages, visibleStages, stageLabels]);
 
   async function patch(id: string, body: Partial<PipelineEntry>) {
     const res = await fetch(`/api/portal/${token}/pipeline/${id}`, {
@@ -336,7 +359,7 @@ export function PipelineBoard({
     return true;
   }
 
-  function toggleStageFilter(s: PipelineStage) {
+  function toggleStageFilter(s: string) {
     setStageFilter((cur) => {
       const next = new Set(cur);
       if (next.has(s)) next.delete(s);
@@ -747,24 +770,29 @@ export function PipelineBoard({
               </span>
             </div>
             <div className="flex flex-wrap gap-1.5">
-              {visibleStages.map((s) => {
-                const active = stageFilter.has(s);
-                const style = STAGE_STYLE[s];
+              {filterStages.map((st) => {
+                const active = stageFilter.has(st.key);
+                const style = st.canonical
+                  ? STAGE_STYLE[st.key as PipelineStage]
+                  : null;
                 return (
                   <button
-                    key={s}
+                    key={st.key}
                     type="button"
-                    onClick={() => toggleStageFilter(s)}
+                    onClick={() => toggleStageFilter(st.key)}
+                    style={active && st.hex ? { backgroundColor: st.hex } : undefined}
                     className={cn(
                       "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11.5px] font-medium transition-all",
                       active
-                        ? `${style.bg} ${style.text} border-transparent`
+                        ? st.hex
+                          ? "border-transparent text-white"
+                          : `${style?.bg ?? "bg-[#8b95a3]"} ${style?.text ?? "text-white"} border-transparent`
                         : "border-[#ebecf0] bg-white text-[#5b6472] hover:bg-[#f6f7f9]",
                     )}
                   >
-                    {stageLabels[s]}
+                    {st.label}
                     <span className={cn("tabular-nums", active ? "" : "text-[#9aa0ab]")}>
-                      {stageCounts[s]}
+                      {stageCounts[st.key] ?? 0}
                     </span>
                   </button>
                 );

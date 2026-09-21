@@ -1,7 +1,7 @@
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import { createInstantlyClient } from "@/lib/instantly/client";
 import { labelInboundMessage } from "@/lib/ai/run";
-import { loadAgents, loadAgentWithKey, createDraftForAgent } from "@/lib/ai/agent";
+import { runReplyAgentForThread } from "@/lib/ai/runtime";
 import { deriveClientIdFromCampaign } from "@/lib/clients/derive";
 import type { InstantlyEmail, InstantlyWebhookEnvelope } from "@/lib/instantly/types";
 
@@ -524,42 +524,22 @@ export async function handleInstantlyEvent(envelope: InstantlyWebhookEnvelope): 
       console.error("[ai] labelInboundMessage (instantly) failed", err);
     }
     try {
-      const candidate = (await loadAgents(ctx.workspaceId))
-        .filter((a) => a.active)
-        .filter((a) => a.channel_filter === "both" || a.channel_filter === "email")
-        .filter((a) => {
-          if (a.channel_ids.length === 0) return true;
-          return ctx.channelId !== null && a.channel_ids.includes(ctx.channelId);
-        })
-        .sort((a, b) => (a.created_at < b.created_at ? -1 : 1))[0];
-      if (candidate) {
-        const full = await loadAgentWithKey(candidate.id);
-        if (full && full.api_key) {
-          const { data: allMessages } = await createAdminSupabase()
-            .from("messages")
-            .select("direction, sent_at, body_text, body_html")
-            .eq("thread_id", threadId)
-            .order("sent_at", { ascending: true });
-          const conversation = (allMessages ?? []).map((m) => ({
-            direction: m.direction as "inbound" | "outbound",
-            sentAt: (m.sent_at as string | null) ?? null,
-            body:
-              (m.body_text as string | null) ??
-              stripHtml((m.body_html as string | null) ?? ""),
-          }));
-          await createDraftForAgent({
-            workspaceId: ctx.workspaceId,
-            threadId,
-            agent: full,
-            leadName:
-              [envelope.firstName, envelope.lastName].filter(Boolean).join(" ") || null,
-            leadEmail,
-            ourName: null,
-            ourEmail: envelope.email_account ?? null,
-            subject: envelope.reply_subject ?? null,
-            conversation,
-          });
-        }
+      /*
+       * The reply-agent engine (lib/ai/runtime.ts): which agent owns this
+       * client's thread, its pause/shadow/live mode, the qualification script
+       * and the safety gate. It reads the thread, its messages and its lead
+       * from the rows committed above, so it runs AFTER the backfill. Never
+       * throws; every outcome is a value.
+       */
+      const outcome = await runReplyAgentForThread(ctx.workspaceId, threadId);
+      if (outcome.status === "drafted") {
+        console.log(
+          `[agent:${outcome.agentName}] drafted ${outcome.intent} (${outcome.mode}) for thread ${threadId}`,
+        );
+      } else if (outcome.status === "draft_failed") {
+        console.error(`[agent] draft failed for thread ${threadId}: ${outcome.error}`);
+      } else {
+        console.log(`[agent] thread ${threadId} -> ${outcome.status}`);
       }
     } catch (err) {
       console.error("[agents] instantly draft generation failed", err);

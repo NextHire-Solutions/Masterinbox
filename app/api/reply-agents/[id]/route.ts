@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireSession } from "@/lib/auth/workspace";
-import { saveAgent, deleteAgent } from "@/lib/ai/agent";
+import { saveAgent, deleteAgent, LiveModeNotEnabledError } from "@/lib/ai/agent";
+import { normaliseUpgradeFields, upgradeFieldsSchema } from "@/lib/ai/agent-schema";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,7 @@ const patchSchema = z.object({
   channel_filter: z.enum(CHANNEL_FILTERS).optional(),
   active: z.boolean().optional(),
   auto_respond_new: z.boolean().optional(),
+  ...upgradeFieldsSchema,
 });
 
 export async function PATCH(
@@ -64,9 +66,18 @@ export async function PATCH(
       channel_filter: parsed.data.channel_filter,
       active: parsed.data.active,
       auto_respond_new: parsed.data.auto_respond_new,
+      run_mode: parsed.data.run_mode,
+      client_ids: parsed.data.client_ids,
+      ...normaliseUpgradeFields(parsed.data),
     });
     return NextResponse.json({ ok: true });
   } catch (err) {
+    // Refused by policy, not malformed — see ai/live-gate.ts. This is the
+    // request an inline "go live" toggle in the UI would make, and it is the
+    // reason that toggle cannot arm an agent.
+    if (err instanceof LiveModeNotEnabledError) {
+      return NextResponse.json({ error: err.message }, { status: 403 });
+    }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Save failed" },
       { status: 400 },

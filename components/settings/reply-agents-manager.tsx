@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   Plus,
@@ -13,6 +13,10 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  Copy,
+  Pause,
+  Play,
+  SlidersHorizontal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,7 +30,27 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { ReplyAgent } from "@/lib/ai/agent";
+import type { RunMode } from "@/lib/ai/agent-config";
+import type { AgentStatsRow } from "@/lib/ai/stats";
 import { cn } from "@/lib/utils";
+import {
+  ReplyAgentConfigDialog,
+  describeSchedule,
+  type ClientOption,
+} from "@/components/settings/reply-agent-config-dialog";
+
+/*
+ * The per-agent numbers, plan §8. Read from GET /api/reply-agents/stats — the
+ * same route an external tool reads — so the number on this screen and the
+ * number in somebody's spreadsheet come from one reader. Until migration 0010
+ * has run the route answers 503 with the reason, and the panel says so rather
+ * than rendering an unexplained blank.
+ */
+type AgentStats = AgentStatsRow["stats"];
+
+function pct(v: number | null): string {
+  return v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`;
+}
 
 const PROVIDERS = [
   { value: "openai", label: "OpenAI" },
@@ -113,11 +137,99 @@ const EMPTY_FORM: FormState = {
   active: true,
 };
 
-export function ReplyAgentsManager({ agents }: { agents: ReplyAgent[] }) {
+export function ReplyAgentsManager({
+  agents,
+  clients,
+  liveSendingEnabled,
+}: {
+  agents: ReplyAgent[];
+  clients: ClientOption[];
+  liveSendingEnabled: boolean;
+}) {
   const router = useRouter();
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<ReplyAgent | null>(null);
+  const [configuring, setConfiguring] = useState<ReplyAgent | null>(null);
+  const [stats, setStats] = useState<Map<string, AgentStats> | null>(null);
+  const [statsNote, setStatsNote] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  // Re-read whenever the roster changes (a save, a duplicate, a pause all
+  // refresh the page and hand down a new `agents` array). setState only ever
+  // runs inside the promise callbacks, never synchronously in the effect body.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/reply-agents/stats?per_page=200", { cache: "no-store" })
+      .then(async (res) => {
+        const json = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(json?.detail ?? json?.error ?? `Stats unavailable (${res.status})`);
+        return (json?.data ?? []) as AgentStatsRow[];
+      })
+      .then((rows) => {
+        if (cancelled) return;
+        setStats(new Map(rows.map((r) => [r.agent_id, r.stats])));
+        setStatsNote(null);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setStats(null);
+        setStatsNote(e instanceof Error ? e.message : "Stats unavailable");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agents]);
+
+  async function patchAgent(a: ReplyAgent, body: Record<string, unknown>): Promise<string | null> {
+    const res = await fetch(`/api/reply-agents/${a.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      return json.error ?? `Request failed (${res.status})`;
+    }
+    return null;
+  }
+
+  /*
+   * Inline pause / activate, plan §7. One click, no dialog: pause is the kill
+   * switch and a kill switch behind a modal is not one. "Activate" always
+   * means shadow — nothing on this screen can arm an agent to live.
+   */
+  async function setMode(a: ReplyAgent, mode: RunMode) {
+    setBusy(a.id);
+    setNotice(null);
+    const err = await patchAgent(a, { run_mode: mode });
+    setBusy(null);
+    if (err) {
+      setNotice(err);
+      return;
+    }
+    setNotice(
+      mode === "pause"
+        ? `${a.name} is paused. It will not touch another thread until you switch it back.`
+        : `${a.name} is in ${mode} mode.`,
+    );
+    startTransition(() => router.refresh());
+  }
+
+  async function duplicate(a: ReplyAgent) {
+    setBusy(a.id);
+    setNotice(null);
+    const res = await fetch(`/api/reply-agents/${a.id}/duplicate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const json = await res.json().catch(() => ({}));
+    setBusy(null);
+    setNotice(res.ok ? json.note ?? "Duplicated." : json.error ?? "Duplicate failed");
+    if (res.ok) startTransition(() => router.refresh());
+  }
   const [step, setStep] = useState<1 | 2>(1);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [showKey, setShowKey] = useState(false);
@@ -207,6 +319,8 @@ export function ReplyAgentsManager({ agents }: { agents: ReplyAgent[] }) {
 
   const canAdvance = step === 1 ? form.name.trim().length > 0 : true;
 
+  const clientName = (id: string) => clients.find((c) => c.id === id)?.name ?? id.slice(0, 8);
+
   return (
     <div className="space-y-5">
       {/* Header row */}
@@ -268,6 +382,27 @@ export function ReplyAgentsManager({ agents }: { agents: ReplyAgent[] }) {
         </ul>
       </div>
 
+      {/*
+        * Stated once, at the top, rather than repeated on every card: Live is
+        * off for the whole server, and this is the sentence that says why.
+        */}
+      {!liveSendingEnabled ? (
+        <div
+          className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"
+          data-testid="live-off-banner"
+        >
+          <p className="font-semibold mb-1">Live sending is off on this server.</p>
+          <p className="text-amber-900/90">
+            The whole live path is built — safety gate, schedule, off-hours release, the CC
+            handover and the send itself — but nothing can send until someone sets{" "}
+            <code className="text-[12px]">MASTER_INBOX_REPLY_AGENT_LIVE_SEND=1</code> deliberately.
+            Shadow shows you exactly what an agent would have sent.
+          </p>
+        </div>
+      ) : null}
+
+      {notice ? <p className="text-xs text-muted-foreground">{notice}</p> : null}
+
       {/* Empty state or agent grid */}
       {filtered.length === 0 ? (
         <div className="rounded-lg border bg-card py-14 text-center">
@@ -302,14 +437,57 @@ export function ReplyAgentsManager({ agents }: { agents: ReplyAgent[] }) {
                           : "bg-zinc-100 text-zinc-600",
                       )}
                     >
-                      {a.active ? "Active" : "Paused"}
+                      {a.active ? "Active" : "Inactive"}
                     </span>
+                    <ModePill mode={a.run_mode} />
                   </div>
                   <p className="text-xs text-muted-foreground mt-0.5">
                     {channelLabel(a.channel_filter)} · {a.provider} · {a.model}
                   </p>
                 </div>
                 <div className="flex items-center gap-0.5 shrink-0">
+                  {a.run_mode === "pause" ? (
+                    <button
+                      type="button"
+                      onClick={() => setMode(a, "shadow")}
+                      disabled={busy !== null}
+                      className="size-7 rounded-md flex items-center justify-center text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                      aria-label="Activate (shadow)"
+                      title="Activate (shadow)"
+                    >
+                      <Play className="size-3.5" />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setMode(a, "pause")}
+                      disabled={busy !== null}
+                      className="size-7 rounded-md flex items-center justify-center text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                      aria-label="Pause"
+                      title="Pause"
+                    >
+                      <Pause className="size-3.5" />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setConfiguring(a)}
+                    className="size-7 rounded-md flex items-center justify-center text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                    aria-label="Configure"
+                    title="Configure mode, clients, questions, handover, schedule"
+                  >
+                    <SlidersHorizontal className="size-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => duplicate(a)}
+                    disabled={busy !== null}
+                    className="size-7 rounded-md flex items-center justify-center text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                    aria-label="Duplicate"
+                    title="Duplicate as a paused test variant"
+                  >
+                    <Copy className="size-3.5" />
+                  </button>
                   <button
                     type="button"
                     onClick={() => openEdit(a)}
@@ -342,11 +520,72 @@ export function ReplyAgentsManager({ agents }: { agents: ReplyAgent[] }) {
                 <span className={a.has_api_key ? "text-emerald-600" : "text-amber-600"}>
                   {a.has_api_key ? "Configured" : "Not set"}
                 </span>
+                <span className="text-muted-foreground">Clients</span>
+                <span className="truncate" title={a.client_ids.map(clientName).join(", ")}>
+                  {a.client_ids.length === 0 ? "Any (house agent)" : a.client_ids.map(clientName).join(", ")}
+                </span>
+                <span className="text-muted-foreground">Questions</span>
+                <span>
+                  {a.qualification.enabled ? `${a.qualification.questions.length} asked` : "None"}
+                </span>
+                <span className="text-muted-foreground">Handover</span>
+                <span className="truncate" title={a.handover.ccEmails.join(", ")}>
+                  {a.handover.ccEmails.length > 0
+                    ? `Introduction, CC client contacts + ${a.handover.ccEmails.join(", ")}`
+                    : "Introduction, CC client contacts"}
+                </span>
+                <span className="text-muted-foreground">Schedule</span>
+                <span className="truncate" title={describeSchedule(a.schedule)}>
+                  {describeSchedule(a.schedule)}
+                </span>
               </div>
+
+              {/* ---- the numbers, plan §8 ---- */}
+              {stats?.get(a.id) ? (
+                <div className="grid grid-cols-4 gap-1.5 pt-1" data-testid="agent-stats">
+                  <Metric label="Drafted" value={stats.get(a.id)!.replies_drafted} />
+                  <Metric label="Sent" value={stats.get(a.id)!.replies_sent} sub={pct(stats.get(a.id)!.reply_rate)} />
+                  <Metric label="Lead replies" value={stats.get(a.id)!.lead_replies_received} />
+                  <Metric
+                    label="Qualified"
+                    value={stats.get(a.id)!.qualification_qualified}
+                    sub={`${pct(stats.get(a.id)!.qualification_rate)} of ${stats.get(a.id)!.qualification_started}`}
+                  />
+                  <Metric
+                    label="Handed over"
+                    value={stats.get(a.id)!.qualification_handed_over}
+                    sub={pct(stats.get(a.id)!.handover_rate)}
+                  />
+                  <Metric label="Stopped" value={stats.get(a.id)!.qualification_stopped} />
+                  <Metric label="Held" value={stats.get(a.id)!.sends_held} sub="gate refused" />
+                  <Metric label="Tokens" value={stats.get(a.id)!.tokens_total} />
+                </div>
+              ) : null}
             </div>
           ))}
         </div>
       )}
+
+      {statsNote ? (
+        <p className="text-xs text-muted-foreground" data-testid="stats-note">
+          <span className="font-medium text-foreground">No numbers yet.</span> {statsNote}
+        </p>
+      ) : null}
+
+      <ReplyAgentConfigDialog
+        agent={configuring}
+        clients={clients}
+        liveSendingEnabled={liveSendingEnabled}
+        open={configuring !== null}
+        onOpenChange={(v) => {
+          if (!v) setConfiguring(null);
+        }}
+        onSaved={() => {
+          setConfiguring(null);
+          setNotice("Saved.");
+          startTransition(() => router.refresh());
+        }}
+      />
 
       {/* 2-step wizard dialog */}
       <Dialog open={open} onOpenChange={setOpen}>
@@ -665,4 +904,44 @@ function StepBadge({
 function channelLabel(filter: ChannelFilter): string {
   if (filter === "email") return "Email";
   return "All";
+}
+
+function ModePill({ mode }: { mode: RunMode }) {
+  const look: Record<RunMode, { text: string; className: string; title: string }> = {
+    pause: {
+      text: "Paused",
+      className: "bg-zinc-100 text-zinc-600",
+      title: "Does nothing on any thread.",
+    },
+    shadow: {
+      text: "Shadow",
+      className: "bg-blue-100 text-blue-700",
+      title: "Writes a draft into the composer. Never sends.",
+    },
+    live: {
+      text: "Live",
+      className: "bg-emerald-100 text-emerald-700",
+      title: "Sends automatically, within its schedule and the safety gate.",
+    },
+  };
+  const l = look[mode];
+  return (
+    <span
+      className={cn("text-[10px] px-1.5 py-0.5 rounded-full font-medium", l.className)}
+      title={l.title}
+      data-testid="mode-pill"
+    >
+      {l.text}
+    </span>
+  );
+}
+
+function Metric({ label, value, sub }: { label: string; value: number; sub?: string }) {
+  return (
+    <div className="rounded-md border bg-muted/30 px-2 py-1.5 min-w-0">
+      <p className="text-[10px] text-muted-foreground truncate">{label}</p>
+      <p className="text-sm font-semibold tabular-nums">{value.toLocaleString()}</p>
+      {sub ? <p className="text-[10px] text-muted-foreground truncate">{sub}</p> : null}
+    </div>
+  );
 }

@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireSession } from "@/lib/auth/workspace";
-import { loadAgents, saveAgent } from "@/lib/ai/agent";
+import { LiveModeNotEnabledError, loadAgents, saveAgent } from "@/lib/ai/agent";
+import { normaliseUpgradeFields, upgradeFieldsSchema } from "@/lib/ai/agent-schema";
+import { liveSendingEnabled } from "@/lib/ai/live-gate";
 
 export const dynamic = "force-dynamic";
 
@@ -25,12 +27,19 @@ const createSchema = z.object({
   channel_filter: z.enum(CHANNEL_FILTERS).default("both"),
   active: z.boolean().default(true),
   auto_respond_new: z.boolean().default(false),
+  ...upgradeFieldsSchema,
 });
 
 export async function GET() {
   const session = await requireSession();
   const agents = await loadAgents(session.activeWorkspace.id);
-  return NextResponse.json({ agents });
+  /*
+   * `live_sending_enabled` travels with the list so the screen can say why the
+   * Live option is unavailable rather than simply not offering it. A control
+   * that is missing looks like a bug; a control that is disabled with a reason
+   * is an explanation.
+   */
+  return NextResponse.json({ agents, live_sending_enabled: liveSendingEnabled() });
 }
 
 export async function POST(request: Request) {
@@ -60,9 +69,17 @@ export async function POST(request: Request) {
       channel_filter: parsed.data.channel_filter,
       active: parsed.data.active,
       auto_respond_new: parsed.data.auto_respond_new,
+      run_mode: parsed.data.run_mode,
+      client_ids: parsed.data.client_ids,
+      ...normaliseUpgradeFields(parsed.data),
     });
     return NextResponse.json({ id });
   } catch (err) {
+    // 403 rather than 400: the request was well-formed and was refused by
+    // policy. The message names the environment variable and what it protects.
+    if (err instanceof LiveModeNotEnabledError) {
+      return NextResponse.json({ error: err.message }, { status: 403 });
+    }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Save failed" },
       { status: 400 },

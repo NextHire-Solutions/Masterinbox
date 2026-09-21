@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --experimental-transform-types --experimental-test-module-mocks --import ./scripts/alias-hooks.mjs --test 'lib/**/*.test.ts'"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",

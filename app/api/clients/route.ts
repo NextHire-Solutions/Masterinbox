@@ -187,11 +187,13 @@ export async function POST(request: Request) {
     // with. Historically these were flipped on per-client during rollout, so
     // portals created afterward came up missing them. Seeding here means every
     // new portal gets the current functionality automatically:
-    //   • manage_stages       — the "Manage stages" panel (add/edit/reorder/hide)
-    //   • pipeline_kanban_view — the List ↔ Board (kanban) view toggle
+    //   • manage_stages         — the "Manage stages" panel (add/edit/reorder/hide)
+    //   • pipeline_kanban_view   — the List ↔ Board (kanban) view toggle
+    //   • pipeline_board_enhanced — per-stage aggregated sales volume in the board
     insertRow.feature_flags = {
       manage_stages: true,
       pipeline_kanban_view: true,
+      pipeline_board_enhanced: true,
     };
   }
   // Widen the returned column set so the caller gets everything

@@ -109,11 +109,22 @@ const KNOWN_KEYS = new Set([
   "sender.email",
 ]);
 
-export function substituteVariables(
-  text: string,
-  context: SubstitutionContext,
-): string {
-  const get = (key: string): string | null => {
+/** Every known key, with the words a person would use for it. */
+const VARIABLE_LABEL: Record<string, string> = {
+  "lead.name": "the lead's name",
+  "lead.first_name": "the lead's first name",
+  "lead.email": "the lead's email",
+  "lead.phone_number": "the lead's phone number",
+  "lead.company": "the lead's brokerage",
+  "lead.title": "the lead's title",
+  "thread.subject": "the subject",
+  "sender.name": "your name",
+  "sender.first_name": "your first name",
+  "sender.email": "your email",
+};
+
+function resolver(context: SubstitutionContext) {
+  return (key: string): string | null => {
     switch (key) {
       case "lead.name":
         return readableName(context.lead?.name);
@@ -139,10 +150,44 @@ export function substituteVariables(
         return null;
     }
   };
+}
+
+export function substituteVariables(
+  text: string,
+  context: SubstitutionContext,
+): string {
+  const get = resolver(context);
   return text.replace(/\{\{\s*([a-z_.]+)\s*\}\}/gi, (match, key: string) => {
     const lower = key.toLowerCase();
     if (!KNOWN_KEYS.has(lower)) return match; // unknown key — leave for user to spot
     const v = get(lower);
     return v !== null && v.length > 0 ? v : "";
   });
+}
+
+/**
+ * Which of the values this text asks for are not available, in plain words.
+ *
+ * Substitution turns an unknown value into nothing, which is right — a
+ * template must never post `{{lead.company}}` to a lead. But it means a
+ * missing value leaves a sentence like "is currently with ." and nothing says
+ * so. This names them, so the composer can.
+ *
+ * Only keys the text actually uses, de-duplicated, in the order they appear.
+ */
+export function missingVariables(
+  text: string,
+  context: SubstitutionContext,
+): string[] {
+  const get = resolver(context);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of text.matchAll(/\{\{\s*([a-z_.]+)\s*\}\}/gi)) {
+    const key = m[1].toLowerCase();
+    if (!KNOWN_KEYS.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    const v = get(key);
+    if (v === null || v.length === 0) out.push(VARIABLE_LABEL[key] ?? key);
+  }
+  return out;
 }
