@@ -79,7 +79,15 @@ export function normalisePhone(raw: string): string {
  * unambiguously a quotation marker.
  */
 export function stripQuoted(body: string): string {
-  const lines = body.split(/\r?\n/);
+  /*
+   * Inline quoting first. Many bodies arrive with NO line breaks — the whole
+   * thread run together ("Talk soon,NicoleOn Fri, Sep 18, 2026 … wrote: Hey
+   * Rachel,") — so the line rules below find nothing and our signature
+   * survives into what looks like the lead's own text.
+   */
+  const inline = body.search(/On\s+\w{3},?\s+\w{3}\s+\d{1,2},?\s+\d{4}[^]{0,80}?wrote:/);
+  const source = inline > 40 ? body.slice(0, inline) : body;
+  const lines = source.split(/\r?\n/);
   const kept: string[] = [];
   for (const line of lines) {
     const t = line.trim();
@@ -114,11 +122,21 @@ export function findLeadPhone(
   recordPhone?: string | null,
 ): FoundPhone | null {
   /*
-   * Ours first, so it can be excluded. Taken from the FULL outbound body,
-   * unstripped — our signature is exactly what we are trying to recognise.
+   * OUR OWN NUMBER IS THE ONE WE SENT BEFORE THEY EVER REPLIED.
+   *
+   * The first version excluded every number appearing in any outbound turn,
+   * and that was wrong in a way that got worse the better the agent behaved:
+   * once it confirms a lead's number back to them ("is 804-496-1390 still
+   * best?"), that number is in an outbound message — so on the next reply it
+   * was discarded as ours, and the agent asked for a number it had just used.
+   *
+   * A number we sent BEFORE their first reply cannot have come from them, so
+   * that is the signature. Anything after may well be theirs, echoed back.
    */
+  const firstInbound = conversation.findIndex((t) => t.direction === "inbound");
+  const beforeTheyWrote = firstInbound === -1 ? conversation : conversation.slice(0, firstInbound);
   const ours = new Set<string>();
-  for (const turn of conversation) {
+  for (const turn of beforeTheyWrote) {
     if (turn.direction !== "outbound") continue;
     for (const m of String(turn.body ?? "").matchAll(PHONE)) {
       ours.add(normalisePhone(m[0]));

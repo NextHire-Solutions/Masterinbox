@@ -77,6 +77,42 @@ test("the lead's own number is taken even when ours is quoted below it", () => {
   assert.equal(found?.digits, "4703451668");
 });
 
+/*
+ * THE REGRESSION THAT COMPOUNDED.
+ *
+ * Once the agent confirms a lead's number back to them — which is exactly the
+ * behaviour we want — that number appears in an outbound message. The first
+ * rule excluded every number seen in any outbound turn, so on the lead's next
+ * reply their own number was discarded as ours and the agent asked for a
+ * number it had used a message earlier. The better it behaved, the more
+ * certainly it forgot.
+ *
+ * Taken from thread fdedd07e: the lead's signature carries 804-496-1390 and a
+ * later outbound carries "(804) 496-1390" because we confirmed it.
+ */
+test("a number we confirmed back to the lead is still THEIR number", () => {
+  const found = findLeadPhone([
+    outbound("Hi Clif — open to more business with no upfront costs?\n\nNicole Collins"),
+    inbound("Sure\n\nClif Harris\nRealtor, Brick & Ivy Real Estate Collective\n804-496-1390"),
+    outbound("Can you confirm that (804) 496-1390 is the best number to reach you?"),
+    inbound("Yes that works."),
+  ]);
+  assert.equal(found?.digits, "8044961390");
+  assert.equal(found?.source, "lead-signature");
+});
+
+/*
+ * And the case the exclusion exists for still holds: a number we sent BEFORE
+ * they ever replied is ours, however often it is quoted back.
+ */
+test("our signature, sent before they replied, is still never taken", () => {
+  const found = findLeadPhone([
+    outbound("Worth a chat?\n\nNicole Collins\nBrokerStaffer\n(602) 625-4675"),
+    inbound("Remind me who you are.On Mon, 21 Sept 2026, Nicole Collins wrote: Worth a chat? Nicole Collins BrokerStaffer (602) 625-4675"),
+  ]);
+  assert.equal(found, null);
+});
+
 test("the newest reply's number supersedes an older one", () => {
   const found = findLeadPhone([
     inbound("Reach me on 770 654-0956"),
