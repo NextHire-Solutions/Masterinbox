@@ -30,6 +30,18 @@ function clampMaxTokens(model: string, requested: number): number {
 // One turn in the email thread. Direction is from OUR perspective:
 //   - inbound  = sent by the lead
 //   - outbound = sent by us (BrokerStaffer)
+/**
+ * One thing we already know about this lead, ready to put in a prompt.
+ *
+ * A label/value pair rather than the raw custom_fields object: enrichment uses
+ * keys like "office city" that read fine to a model, alongside "buy-side" and
+ * "approx gci" that must never reach one.
+ */
+export interface LeadFact {
+  label: string;
+  value: string;
+}
+
 export interface ConversationTurn {
   direction: "inbound" | "outbound";
   sentAt: string | null;
@@ -48,12 +60,35 @@ export interface DraftInput {
   // Context the model needs to write a relevant reply.
   leadName: string | null;
   leadEmail: string | null;
+  /*
+   * WHAT WE ALREADY KNOW ABOUT THIS PERSON.
+   *
+   * Absent, the model asks for it. A real draft reached a real lead reading
+   * "Can you confirm that (your phone number) is the best number to reach you?
+   * Also, are you currently affiliated with a brokerage?" — while the record
+   * held both. The parenthetical was not a broken template variable; it was
+   * the model writing around a fact nobody had given it.
+   */
+  leadPhone?: string | null;
+  leadCompany?: string | null;
+  leadTitle?: string | null;
+  leadFacts?: LeadFact[];
   ourName: string | null;
   ourEmail: string | null;
   subject: string | null;
   // Full thread history, oldest → newest. The last entry should be the
   // most recent inbound message (the one we're replying to).
   conversation: ConversationTurn[];
+  /*
+   * The house style, the objection playbook and the nearest real replies we
+   * have sent, already rendered as prompt text by ai/retrieval.ts.
+   *
+   * Optional and empty-by-default on purpose: when the corpus has not been
+   * built, or retrieval fails for any reason, this is "" and the prompt is
+   * byte-for-byte what it was before this feature existed. There is no flag to
+   * forget to set — absence IS the old behaviour.
+   */
+  guidance?: string;
 }
 
 export interface DraftResult {
@@ -99,11 +134,18 @@ function renderUserPrompt(input: DraftInput): string {
     "Write ONLY the reply body — no greeting line, no sign-off, no subject line, no preamble.",
     "",
     `Lead name: ${input.leadName ?? "the lead"}`,
+    ...renderKnownFacts(input),
     `Your name (the sender): ${input.ourName ?? "You"}`,
     `Subject thread: ${input.subject ?? "(no subject)"}`,
     "",
     conversationBlock,
     "",
+    /*
+     * Precedent goes AFTER the conversation and immediately BEFORE the
+     * instruction to write. The nearest real reply is the most useful thing in
+     * the prompt, and it should be the last thing read before writing.
+     */
+    ...(input.guidance && input.guidance.trim().length > 0 ? [input.guidance, ""] : []),
     "Now write OUR reply to the LAST message above. Use the full conversation as context — reference what was already discussed, do not repeat past pitches, and respond directly to the lead's most recent message.",
   ].join("\n");
 }
@@ -112,6 +154,40 @@ function renderUserPrompt(input: DraftInput): string {
 // clarity over compactness: each turn is delimited by a header row that
 // names the speaker, the date, and the turn number, so the model can refer
 // back ("as you mentioned in [2]…") naturally.
+/**
+ * What we already know, and what the model must do with it.
+ *
+ * Returns nothing when we know nothing beyond a name — an empty heading reads
+ * as though the record is blank, which is a different and more alarming claim
+ * than silence.
+ *
+ * NO EXAMPLE VALUE APPEARS IN THE INSTRUCTION. The first version of this
+ * illustrated the rule with a real lead's number, and the model copied that
+ * number verbatim into a draft for a different lead whose prompt never
+ * contained it. An example in a prompt is not an illustration. It is content.
+ */
+function renderKnownFacts(input: DraftInput): string[] {
+  const known: string[] = [];
+  if (input.leadEmail) known.push(`Email: ${input.leadEmail}`);
+  if (input.leadPhone) known.push(`Phone: ${input.leadPhone}`);
+  if (input.leadCompany) known.push(`Company / brokerage: ${input.leadCompany}`);
+  if (input.leadTitle) known.push(`Title: ${input.leadTitle}`);
+  for (const fact of input.leadFacts ?? []) known.push(`${fact.label}: ${fact.value}`);
+
+  if (!known.length) return [];
+
+  return [
+    "",
+    "WHAT WE ALREADY KNOW ABOUT THIS LEAD:",
+    ...known.map((k) => `  - ${k}`),
+    "",
+    "Do NOT ask for anything listed above — we already have it. Where such a detail matters to the " +
+      "reply, repeat the exact value from the list so the lead can confirm or correct it, rather than " +
+      "asking them to supply it. Never write a bracketed placeholder in place of a value: if a detail " +
+      "is not in the list above, ask for it in plain words instead.",
+  ];
+}
+
 function formatConversation(
   turns: ConversationTurn[],
   leadName: string | null,
