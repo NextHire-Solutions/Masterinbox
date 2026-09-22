@@ -317,6 +317,55 @@ export async function gatherGuidance(input: GuidanceInput): Promise<Guidance> {
 const EXAMPLE_REPLY_CAP = 900;
 const EXAMPLE_INBOUND_CAP = 600;
 
+/*
+ * Asking a lead to confirm their phone number was house habit: 323 of the
+ * 1,385 corpus replies do it, and the distilled style guide and playbook told
+ * the model to do it as well. The practice is discontinued, but the corpus is
+ * a record of what we used to send, so the habit keeps arriving through the
+ * precedents even after the instruction says not to.
+ *
+ * Measured on sixteen real threads: 12/16 drafts asked. Adding a rule to the
+ * agent's system prompt took it to 9/16 — six examples demonstrating a thing
+ * outweigh one line forbidding it. Editing the distilled knowledge took it to
+ * 2/16. This removes the rest at the source.
+ *
+ * It strips only the ASKING. Stating a number we hold — "can be reached
+ * directly at ..." in an introduction — is how the handover works and must
+ * survive.
+ */
+const ASKS_FOR_NUMBER =
+  /\b(?:can|could|would)\s+you\s+confirm\b[^.?!]*\bnumber\b|\bbest\s+(?:contact\s+|phone\s+)?number\b|\bnumber\s+to\s+reach\s+you\b|\bconfirm\b[^.?!]*\b(?:phone|contact)\s+(?:number|details)\b|\bask\s+for\s+the\s+best\b[^.?!]*\bnumber\b|\bwhat(?:'s|\s+is)\s+the\s+best\s+number\b/i;
+
+/** Drop whole sentences (or bullet lines) that ask about a phone number. */
+export function stripPhoneAsk(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      if (!ASKS_FOR_NUMBER.test(line)) return { line, emptied: false };
+      /*
+       * A bullet that is entirely an ask goes; a prose line keeps the
+       * sentences that are not asks, so surrounding advice survives.
+       */
+      const kept = line
+        .split(/(?<=[.?!])\s+/)
+        .filter((sentence) => !ASKS_FOR_NUMBER.test(sentence))
+        .join(" ")
+        .replace(/^[-*]\s*$/, "")
+        .trim();
+      return { line: kept, emptied: kept === "" };
+    })
+    /*
+     * A line emptied by the strip is removed outright rather than left as a
+     * gap — otherwise a deleted bullet punches a hole in the middle of the
+     * style guide. Blank lines that were already there are paragraph breaks
+     * and are kept.
+     */
+    .filter((l) => !l.emptied)
+    .map((l) => l.line)
+    .join("\n")
+    .trim();
+}
+
 /**
  * The guidance as prompt text, or "" when there is none.
  *
@@ -334,13 +383,13 @@ export function renderGuidance(g: Guidance): string {
   if (g.styleGuide) {
     parts.push(
       "=== HOUSE STYLE — these rules are how we always write. Follow them. ===",
-      g.styleGuide,
+      stripPhoneAsk(g.styleGuide),
     );
   }
   if (g.objectionPlaybook) {
     parts.push(
       "=== OBJECTION PLAYBOOK — how we answer each kind of pushback. ===",
-      g.objectionPlaybook,
+      stripPhoneAsk(g.objectionPlaybook),
     );
   }
   if (g.examples.length > 0) {
@@ -355,13 +404,21 @@ export function renderGuidance(g: Guidance): string {
       "Match their voice, length and structure. Do NOT copy their facts — names,",
       "companies, numbers and offers in these examples belong to other conversations.",
       "",
-      ...g.examples.map((e, i) =>
-        [
-          `--- Precedent ${i + 1}${e.label ? ` (situation: ${e.label})` : ""}`,
-          `THEY WROTE: ${e.inbound.replace(/\s+/g, " ").slice(0, EXAMPLE_INBOUND_CAP)}`,
-          `WE REPLIED: ${e.reply.replace(/\s+/g, " ").slice(0, EXAMPLE_REPLY_CAP)}`,
-        ].join("\n"),
-      ),
+      /*
+       * Nine corpus replies are nothing but the phone ask, so sanitising
+       * leaves them empty. An empty precedent teaches nothing and still costs
+       * prompt space, so it is dropped rather than shown as a blank.
+       */
+      ...g.examples
+        .map((e) => ({ ...e, reply: stripPhoneAsk(e.reply) }))
+        .filter((e) => e.reply.trim().length > 0)
+        .map((e, i) =>
+          [
+            `--- Precedent ${i + 1}${e.label ? ` (situation: ${e.label})` : ""}`,
+            `THEY WROTE: ${e.inbound.replace(/\s+/g, " ").slice(0, EXAMPLE_INBOUND_CAP)}`,
+            `WE REPLIED: ${e.reply.replace(/\s+/g, " ").slice(0, EXAMPLE_REPLY_CAP)}`,
+          ].join("\n"),
+        ),
     );
   }
 
