@@ -89,6 +89,12 @@ export async function proxy(request: NextRequest) {
     // in the route handler (reuses OUTCOMES_API_TOKEN). Session-gate bypass
     // only; not open.
     pathname.startsWith("/api/reply-labels") ||
+    // /api/cron/sync-portal-status — the Client Health dashboard pushes here
+    // when a client's status changes (active -> portal on, paused/churned ->
+    // off). Session-gate bypass only; the route handler enforces its own
+    // token (service-role OR the low-privilege PORTAL_STATUS_SYNC_TOKEN via
+    // ?token= / x-cron-token), and is a no-op without ?apply=1.
+    pathname === "/api/cron/sync-portal-status" ||
     // /api/portal/<token>/... — token in the path IS the credential; the
     // route handlers validate it via lib/portals/token.ts.
     pathname.startsWith("/api/portal/")
