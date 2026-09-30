@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { rosterRowForPortal } from "@/lib/clients/roster-for-portal";
 import { requireSession } from "@/lib/auth/workspace";
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import {
@@ -108,16 +109,16 @@ export async function GET(
    */
   let row: Record<string, unknown> | null = null;
   try {
-    const { data } = await admin
-      .from("os_clients")
-      .select(
-        "name, contact_name, contact_role, contact_email, " +
-          "contact2_name, contact2_role, contact2_email, " +
-          "contact3_name, contact3_role, contact3_email, brokerage",
-      )
-      .eq("mi_client_id", clientId)
-      .maybeSingle();
-    row = (data as Record<string, unknown> | null) ?? null;
+    // Any of the client's portals, not only the one the roster record links
+    // — see lib/clients/roster-for-portal.ts.
+    const found = await rosterRowForPortal(
+      clientId,
+      (client?.name as string | undefined) ?? null,
+      "name, contact_name, contact_role, contact_email, " +
+        "contact2_name, contact2_role, contact2_email, " +
+        "contact3_name, contact3_role, contact3_email, brokerage",
+    );
+    row = found.row;
   } catch {
     row = null;
   }

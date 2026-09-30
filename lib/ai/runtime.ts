@@ -6,6 +6,7 @@
  * `src/lib/tools/master-inbox/ai/runtime.ts` in the workspace. If one changes,
  * change the other. There is no shared package between the two deployments.
  */
+import { rosterRowForPortal } from "@/lib/clients/roster-for-portal";
 import { createDraftForAgent, loadAgentWithKey, loadAgents, type ReplyAgent } from "./agent";
 import { selectAgentForThread, type SelectableAgent } from "./agent-config";
 import {
@@ -743,17 +744,17 @@ export async function resolveIntroduction(clientId: string | null): Promise<Intr
 
   let row: Record<string, unknown> | null = null;
   try {
-    const { data, error } = await admin
-      .from("os_clients")
-      .select(
-        "name, contact_name, contact_role, contact_email, " +
-          "contact2_name, contact2_role, contact2_email, " +
-          "contact3_name, contact3_role, contact3_email, brokerage",
-      )
-      .eq("mi_client_id", clientId)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    row = (data as Record<string, unknown> | null) ?? null;
+    // Any of the client's portals, not only the one the record links —
+    // see roster-for-portal.
+    const found = await rosterRowForPortal(
+      clientId,
+      (miClient?.name as string | undefined) ?? null,
+      "name, contact_name, contact_role, contact_email, " +
+        "contact2_name, contact2_role, contact2_email, " +
+        "contact3_name, contact3_role, contact3_email, brokerage",
+    );
+    if (found.error) throw new Error(found.error);
+    row = found.row;
   } catch (err) {
     return {
       client: null,
