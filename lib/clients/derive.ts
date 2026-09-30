@@ -93,11 +93,54 @@ async function loadClients(): Promise<ClientRow[]> {
   return rows;
 }
 
+/**
+ * The campaign a reply came from, as the thread stores it: EmailBison's
+ * number, Instantly's UUID.
+ */
+export interface CampaignRef {
+  platform: "emailbison" | "instantly";
+  id: string | number | null | undefined;
+}
+
+/*
+ * The portal chosen for this campaign, if one was (os_campaign_portals,
+ * migration 0025 in the OS repo, 1 Oct). A client with several portals —
+ * Properties & Estates has Boston and Florida — gets a portal per campaign,
+ * chosen automatically once in the OS and changeable there. Without it the
+ * name guess below sent Florida replies to the Boston portal.
+ *
+ * Read on every call, not cached: a change made in the OS must apply to the
+ * very next reply. Any failure (table not created yet, network) means "no
+ * choice", and the name guess runs exactly as it always has.
+ */
+async function chosenPortal(campaign: CampaignRef | undefined): Promise<string | null> {
+  const id = campaign?.id == null ? "" : String(campaign.id).trim();
+  if (!campaign || !id) return null;
+  try {
+    const { data, error } = await createAdminSupabase()
+      .from("os_campaign_portals")
+      .select("mi_client_id")
+      .eq("platform", campaign.platform)
+      .eq("campaign_id", id)
+      .maybeSingle();
+    if (error || !data) return null;
+    return ((data as { mi_client_id?: string | null }).mi_client_id ?? null) || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function deriveClientIdFromCampaign(
   campaignName: string | null | undefined,
+  campaign?: CampaignRef,
 ): Promise<string | null> {
   const rows = await loadClients();
   if (rows.length === 0) return null;
+
+  // A portal chosen for this exact campaign wins over any guess — provided
+  // that portal still exists.
+  const chosen = await chosenPortal(campaign);
+  if (chosen && rows.some((r) => r.id === chosen)) return chosen;
 
   // Always-resolvable fallback when nothing matches.
   const unknown = rows.find((r) => r.slug === "unknown") ?? null;

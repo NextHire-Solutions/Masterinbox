@@ -75,8 +75,11 @@ export async function syncExternalIntros(opts?: {
   const campaignToClient = new Map<string, string | null>();
   for (const x of intros) {
     const name = x.campaign_name ?? "";
-    if (campaignToClient.has(name)) continue;
-    campaignToClient.set(name, await deriveClientIdFromCampaign(name || null));
+    // Keyed by name AND campaign id: two campaigns with one name may be
+    // sent to different portals (os_campaign_portals).
+    const key = `${name}\u0000${x.campaign_id ?? ""}`;
+    if (campaignToClient.has(key)) continue;
+    campaignToClient.set(key, await deriveClientIdFromCampaign(name || null, { platform: "instantly", id: x.campaign_id }));
   }
 
   // Build rows. Require email + campaign_id (the dedup key); drop feed
@@ -103,7 +106,7 @@ export async function syncExternalIntros(opts?: {
       name: x.name?.trim() || null,
       campaign_id: campaignId,
       campaign_name: x.campaign_name ?? null,
-      client_id: campaignToClient.get(x.campaign_name ?? "") ?? null,
+      client_id: campaignToClient.get(`${x.campaign_name ?? ""}\u0000${x.campaign_id ?? ""}`) ?? null,
       intro_at: x.intro_at ?? x.created_at ?? null,
       source_created_at: x.created_at ?? null,
       source_updated_at: x.updated_at ?? null,

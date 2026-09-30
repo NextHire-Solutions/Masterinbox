@@ -477,7 +477,10 @@ export async function handleInstantlyEvent(envelope: InstantlyWebhookEnvelope): 
 
   // Client tag from campaign name (Instantly conveniently includes the name
   // directly in the envelope — no extra /campaigns/{id} call needed).
-  const clientId = await deriveClientIdFromCampaign(envelope.campaign_name ?? null);
+  const clientId = await deriveClientIdFromCampaign(envelope.campaign_name ?? null, {
+    platform: "instantly",
+    id: envelope.campaign_id,
+  });
 
   const threadId = await upsertThread(ctx, ourLeadId, externalThreadId, {
     subject: envelope.reply_subject ?? null,

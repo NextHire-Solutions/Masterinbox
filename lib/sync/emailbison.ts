@@ -570,7 +570,10 @@ export async function handleEmailBisonEvent(envelope: EmailBisonWebhookEnvelope)
   // Tag thread with the matching BrokerStaffer client (or "Unknown") based on the
   // EmailBison campaign name. Webhook payload carries it directly, so we
   // never hit the EmailBison /campaigns endpoint just for this lookup.
-  const clientId = await deriveClientIdFromCampaign(payload.campaign?.name ?? null);
+  const clientId = await deriveClientIdFromCampaign(payload.campaign?.name ?? null, {
+    platform: "emailbison",
+    id: payload.campaign?.id,
+  });
 
   const threadId = await upsertThread(ctx, ourLeadId, externalThreadId, {
     subject: msg.subject,

@@ -47,10 +47,12 @@ export async function POST(request: Request) {
     id: string;
     campaign_name: string | null;
     client_id: string | null;
+    campaign_id: string | null;
+    source_provider: string | null;
   }>(({ from, to }) =>
     admin
       .from("threads")
-      .select("id, campaign_name, client_id")
+      .select("id, campaign_name, client_id, campaign_id, source_provider")
       .not("campaign_name", "is", null)
       .range(from, to),
   ).catch((err: Error) => {
@@ -69,7 +71,12 @@ export async function POST(request: Request) {
   let changed = 0;
   for (const t of threads) {
     scanned++;
-    const newClientId = await deriveClientIdFromCampaign(t.campaign_name as string);
+    // A portal chosen for the campaign (os_campaign_portals) must win here
+    // too, or a retag would undo it.
+    const newClientId = await deriveClientIdFromCampaign(t.campaign_name as string, {
+      platform: t.source_provider === "instantly" ? "instantly" : "emailbison",
+      id: t.campaign_id,
+    });
     if (!newClientId) continue;
     if (newClientId === t.client_id) continue;
     changed++;

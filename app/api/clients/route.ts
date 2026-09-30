@@ -387,11 +387,14 @@ export async function retagUnknownThreads(
   if (!unknown?.id) return;
   const { data: rows } = await admin
     .from("threads")
-    .select("id, campaign_name")
+    .select("id, campaign_name, campaign_id, source_provider")
     .eq("client_id", unknown.id)
     .not("campaign_name", "is", null);
   for (const t of rows ?? []) {
-    const newClientId = await deriveClientIdFromCampaign(t.campaign_name as string);
+    const newClientId = await deriveClientIdFromCampaign(t.campaign_name as string, {
+      platform: t.source_provider === "instantly" ? "instantly" : "emailbison",
+      id: t.campaign_id as string | null,
+    });
     if (newClientId && newClientId !== unknown.id) {
       await admin
         .from("threads")
