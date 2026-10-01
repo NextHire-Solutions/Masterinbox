@@ -3,10 +3,10 @@ import { rosterRowForPortal } from "@/lib/clients/roster-for-portal";
 import { requireSession } from "@/lib/auth/workspace";
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import {
-  hasIntroDetails,
+  introReady,
+  introText,
   introContactEmails,
   missingIntroFields,
-  renderIntroMacroTemplate,
 } from "@/lib/inbox/intro-macro";
 
 /*
@@ -116,7 +116,7 @@ export async function GET(
       (client?.name as string | undefined) ?? null,
       "name, contact_name, contact_role, contact_email, " +
         "contact2_name, contact2_role, contact2_email, " +
-        "contact3_name, contact3_role, contact3_email, brokerage",
+        "contact3_name, contact3_role, contact3_email, brokerage, intro_override",
     );
     row = found.row;
   } catch {
@@ -138,13 +138,15 @@ export async function GET(
         email: str(`contact${n}_email`),
       })),
       brokerage: str("brokerage"),
+      // The client's own pasted introduction, when set (OS migration 0026).
+      introOverride: str("intro_override"),
     };
 
-    if (hasIntroDetails(details)) {
+    if (introReady(details)) {
       return NextResponse.json({
         available: true,
         clientName,
-        body: renderIntroMacroTemplate(details),
+        body: introText(details),
         bodyHtml: null,
         cc: introContactEmails(details).join(", ") || null,
         introductionLabelId,

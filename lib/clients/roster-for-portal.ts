@@ -25,7 +25,13 @@ export async function rosterRowForPortal(
 ): Promise<{ row: Record<string, unknown> | null; error?: string }> {
   const admin = createAdminSupabase();
 
-  const linked = await admin.from("os_clients").select(columns).eq("mi_client_id", portalId).maybeSingle();
+  // `intro_override` (OS migration 0026) may not exist yet: ask again without it.
+  let cols = columns;
+  let linked = await admin.from("os_clients").select(cols).eq("mi_client_id", portalId).maybeSingle();
+  if (linked.error && /intro_override/.test(linked.error.message) && /intro_override/.test(cols)) {
+    cols = cols.replace(/,\s*intro_override/, "");
+    linked = await admin.from("os_clients").select(cols).eq("mi_client_id", portalId).maybeSingle();
+  }
   if (linked.error) return { row: null, error: linked.error.message };
   if (linked.data) return { row: linked.data as unknown as Record<string, unknown> };
 
@@ -34,7 +40,7 @@ export async function rosterRowForPortal(
       .from("os_campaign_portals").select("os_client_id").eq("mi_client_id", portalId).limit(1).maybeSingle();
     const osId = (route as { os_client_id?: string } | null)?.os_client_id;
     if (osId) {
-      const { data } = await admin.from("os_clients").select(columns).eq("id", osId).maybeSingle();
+      const { data } = await admin.from("os_clients").select(cols).eq("id", osId).maybeSingle();
       if (data) return { row: data as unknown as Record<string, unknown> };
     }
   } catch {
@@ -43,7 +49,7 @@ export async function rosterRowForPortal(
 
   const want = norm(portalName);
   if (want) {
-    const { data } = await admin.from("os_clients").select(`id, name, aliases, ${columns}`);
+    const { data } = await admin.from("os_clients").select(`id, name, aliases, ${cols}`);
     const hits = ((data ?? []) as unknown as Record<string, unknown>[]).filter((r) =>
       [r.name as string, ...(((r.aliases as string[] | null) ?? []))].some((n) => norm(n) === want),
     );

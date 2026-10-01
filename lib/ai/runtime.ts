@@ -751,7 +751,7 @@ export async function resolveIntroduction(clientId: string | null): Promise<Intr
       (miClient?.name as string | undefined) ?? null,
       "name, contact_name, contact_role, contact_email, " +
         "contact2_name, contact2_role, contact2_email, " +
-        "contact3_name, contact3_role, contact3_email, brokerage",
+        "contact3_name, contact3_role, contact3_email, brokerage, intro_override",
     );
     if (found.error) throw new Error(found.error);
     row = found.row;
@@ -785,6 +785,8 @@ export async function resolveIntroduction(clientId: string | null): Promise<Intr
         email: str(`contact${n}_email`),
       })),
       brokerage: str("brokerage"),
+      // The client's own pasted introduction, when set (OS migration 0026).
+      introOverride: str("intro_override"),
     },
     unavailableReason: null,
   };

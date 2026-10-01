@@ -72,6 +72,12 @@ export interface IntroMacroClient {
    * before — see `renderIntroMacroTemplate`.
    */
   extraContacts?: IntroMacroContact[] | null;
+  /**
+   * The client's own introduction, pasted on the record (os_clients.
+   * intro_override, OS migration 0026). When set it replaces the standard
+   * wording below; it may use the same {{lead.*}} / {{sender.*}} fields.
+   */
+  introOverride?: string | null;
 }
 
 /** One of the people an agent is introduced to. */
@@ -241,4 +247,25 @@ export function renderIntroMacroTemplate(client: IntroMacroClient): string {
 /** The name given to a client's stored template. Used to find it again. */
 export function introTemplateName(clientName: string): string {
   return `Intro Macro - ${clientName}`;
+}
+
+/* ------------------------------------------------------------------------ */
+
+/** The client's custom introduction, when one is set (blank counts as none). */
+export function customIntro(client: IntroMacroClient): string | null {
+  const t = (client.introOverride ?? "").trim();
+  return t ? t : null;
+}
+
+/** The introduction to use: the client's custom one, else the standard wording. */
+export function introText(client: IntroMacroClient): string {
+  return customIntro(client) ?? renderIntroMacroTemplate(client);
+}
+
+/**
+ * Whether there is an introduction to send. A custom intro is enough on its
+ * own; otherwise the standard wording needs the contact name and role.
+ */
+export function introReady(client: IntroMacroClient): boolean {
+  return customIntro(client) !== null || hasIntroDetails(client);
 }
