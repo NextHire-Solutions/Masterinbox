@@ -18,6 +18,8 @@ import { createAdminSupabase } from "@/lib/supabase/admin";
  */
 const norm = (s: string | null | undefined) => (s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
+const OPTIONAL_COLUMNS = ["intro_override", "more_contacts", "contact_territories"];
+
 export async function rosterRowForPortal(
   portalId: string,
   portalName: string | null,
@@ -26,14 +28,15 @@ export async function rosterRowForPortal(
   const admin = createAdminSupabase();
 
   // Columns a migration may not have added yet — intro_override (0026),
-  // more_contacts (0028): ask again without whichever one is missing.
+  // more_contacts (0028), contact_territories (0029): ask again without
+  // whichever one the error names, until none is missing.
   let cols = columns;
   let linked = await admin.from("os_clients").select(cols).eq("mi_client_id", portalId).maybeSingle();
-  for (const optional of ["intro_override", "more_contacts"]) {
-    if (linked.error && linked.error.message.includes(optional) && cols.includes(optional)) {
-      cols = cols.replace(new RegExp(`,\\s*${optional}`), "");
-      linked = await admin.from("os_clients").select(cols).eq("mi_client_id", portalId).maybeSingle();
-    }
+  for (let i = 0; i < OPTIONAL_COLUMNS.length && linked.error; i++) {
+    const missing = OPTIONAL_COLUMNS.find((c) => linked.error!.message.includes(c) && cols.includes(c));
+    if (!missing) break;
+    cols = cols.replace(new RegExp(`,\\s*${missing}\\b`), "");
+    linked = await admin.from("os_clients").select(cols).eq("mi_client_id", portalId).maybeSingle();
   }
   if (linked.error) return { row: null, error: linked.error.message };
   if (linked.data) return { row: linked.data as unknown as Record<string, unknown> };

@@ -78,6 +78,8 @@ export interface IntroMacroClient {
    * wording below; it may use the same {{lead.*}} / {{sender.*}} fields.
    */
   introOverride?: string | null;
+  /** The first contact's territories (os_clients.contact_territories, 0029). See `routeIntro`. */
+  contactTerritories?: string[] | null;
 }
 
 /** One of the people an agent is introduced to. */
@@ -90,6 +92,11 @@ export interface IntroMacroContact {
   email?: string | null;
   /** Overrides the first name derived from `name`. */
   firstName?: string | null;
+  /**
+   * The places this person covers — "Charleston", "Summerville" — matched
+   * against the lead's campaign name by `routeIntro`. Empty: every lead.
+   */
+  territories?: string[] | null;
 }
 
 /**
@@ -108,6 +115,7 @@ export function introContacts(client: IntroMacroClient): IntroMacroContact[] {
       role: client.contactRole,
       email: client.contactEmail ?? null,
       firstName: client.contactFirstName ?? null,
+      territories: client.contactTerritories ?? null,
     },
     ...(client.extraContacts ?? []),
   ];
@@ -285,7 +293,149 @@ export function moreContactsFrom(value: unknown): IntroMacroContact[] {
   const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
   return value
     .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
-    .map((x) => ({ name: str(x.name), role: str(x.role), email: str(x.email) }))
+    .map((x) => ({ name: str(x.name), role: str(x.role), email: str(x.email), territories: territoriesFrom(x.territories) }))
     .filter((x) => x.name || x.role || x.email)
     .slice(0, MAX_INTRO_CONTACTS - 3);
+}
+
+/* ------------------------------------------------------------------------ */
+/*
+ * TERRITORIES (Jeff Cook, 6 Oct).
+ *
+ * A client with one point of contact per territory wants each lead introduced
+ * to that territory's people only. The territory is already known for every
+ * lead: each campaign is built for one territory and says so in its name
+ * ("Jeff Cook Real Estate + Charleston, SC + ZF NS1"), and every thread
+ * records its campaign. So each person may list the places they cover, and a
+ * person is introduced when one of those places appears in the campaign name.
+ *
+ * People 1-3 keep theirs in os_clients.contact_territories ({"1": [...],
+ * "2": [...], "3": [...]}, OS migration 0029); people 4+ inside their own
+ * more_contacts entry. A client with no territories anywhere is untouched.
+ */
+
+/** At most this many places per person. */
+export const MAX_TERRITORIES = 10;
+
+/** A list of place names, cleaned: trimmed, blanks and repeats dropped, capped. */
+export function territoriesFrom(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const v of value) {
+    const t = typeof v === "string" ? v.trim().replace(/\s+/g, " ") : "";
+    if (t && !out.some((o) => placeKey(o) === placeKey(t))) out.push(t);
+  }
+  return out.slice(0, MAX_TERRITORIES);
+}
+
+/** Person `slot`'s (1-3) territories from os_clients.contact_territories. */
+export function slotTerritories(value: unknown, slot: 1 | 2 | 3): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return territoriesFrom((value as Record<string, unknown>)[String(slot)]);
+}
+
+/**
+ * How a place or a campaign name is compared: accents, case, dashes and
+ * punctuation ignored, so "Charlotte–Triad, NC" contains "charlotte" and
+ * "Mt. Pleasant" equals "mt pleasant".
+ */
+export function placeKey(value: string | null | undefined): string {
+  return (value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/** Whether `place` appears in `campaignName` as whole words. */
+export function campaignCovers(campaignName: string | null | undefined, place: string): boolean {
+  const p = placeKey(place);
+  return !!p && ` ${placeKey(campaignName)} `.includes(` ${p} `);
+}
+
+export interface IntroRoute {
+  /** False when nobody on this client has a territory: everyone, as always. */
+  byTerritory: boolean;
+  /** The places in the campaign name that picked the people. */
+  matched: string[];
+  /** Territories are set but the campaign names none of them: everyone is introduced. */
+  fallback: boolean;
+  /** Who this lead is introduced to, by name, in order. */
+  people: string[];
+}
+
+/**
+ * The client as THIS lead's introduction needs it: only the people whose
+ * territory appears in the lead's campaign name, plus anyone with no
+ * territory (they are on every introduction). When the campaign names no
+ * territory at all, everyone — a lead is never left without a person.
+ *
+ * Returns a client whose contact fields hold just those people, so the
+ * wording, the Cc and the reply agent's handover need no change of their own.
+ */
+export function routeIntro(
+  client: IntroMacroClient,
+  campaignName: string | null | undefined,
+): { client: IntroMacroClient; route: IntroRoute } {
+  const people = introContacts(client);
+  const names = (list: IntroMacroContact[]) => list.map((c) => (c.name ?? "").trim());
+  const covers = (c: IntroMacroContact) => (c.territories ?? []).filter((t) => campaignCovers(campaignName, t));
+  if (!people.some((c) => (c.territories ?? []).length)) {
+    return { client, route: { byTerritory: false, matched: [], fallback: false, people: names(people) } };
+  }
+  const hits = people.filter((c) => covers(c).length);
+  if (!hits.length) {
+    return { client, route: { byTerritory: true, matched: [], fallback: true, people: names(people) } };
+  }
+  const keep = people.filter((c) => !(c.territories ?? []).length || hits.includes(c));
+  const matched: string[] = [];
+  for (const c of hits) for (const t of covers(c)) if (!matched.some((m) => placeKey(m) === placeKey(t))) matched.push(t);
+  const [first, ...rest] = keep;
+  return {
+    client: {
+      ...client,
+      contactName: first.name,
+      contactRole: first.role,
+      contactEmail: first.email ?? null,
+      contactFirstName: first.firstName ?? null,
+      contactTerritories: first.territories ?? null,
+      extraContacts: rest,
+    },
+    route: { byTerritory: true, matched, fallback: false, people: names(keep) },
+  };
+}
+
+/** The os_clients columns `introClientFromRow` reads. */
+export const INTRO_ROW_COLUMNS =
+  "name, contact_name, contact_role, contact_email, " +
+  "contact2_name, contact2_role, contact2_email, " +
+  "contact3_name, contact3_role, contact3_email, brokerage, intro_override, more_contacts, contact_territories";
+
+/**
+ * An os_clients row as the macro needs it: person 1, people 2-3 from their
+ * columns, 4+ from more_contacts (0028), each with their territories (0029),
+ * and the custom intro (0026). A column a migration has not added yet reads
+ * as empty. One mapping for the Introduce button and the reply agent.
+ */
+export function introClientFromRow(row: Record<string, unknown>, fallbackName: string): IntroMacroClient {
+  const str = (k: string) => (typeof row[k] === "string" && (row[k] as string)) || null;
+  return {
+    name: str("name") ?? fallbackName,
+    contactName: str("contact_name"),
+    contactRole: str("contact_role"),
+    contactEmail: str("contact_email"),
+    contactTerritories: slotTerritories(row.contact_territories, 1),
+    extraContacts: [
+      ...([2, 3] as const).map((n) => ({
+        name: str(`contact${n}_name`),
+        role: str(`contact${n}_role`),
+        email: str(`contact${n}_email`),
+        territories: slotTerritories(row.contact_territories, n),
+      })),
+      ...moreContactsFrom(row.more_contacts),
+    ],
+    brokerage: str("brokerage"),
+    introOverride: str("intro_override"),
+  };
 }

@@ -6,7 +6,7 @@
  * `src/lib/tools/master-inbox/ai/runtime.ts` in the workspace. If one changes,
  * change the other. There is no shared package between the two deployments.
  */
-import { moreContactsFrom } from "@/lib/inbox/intro-macro";
+import { INTRO_ROW_COLUMNS, introClientFromRow, routeIntro } from "@/lib/inbox/intro-macro";
 import { rosterRowForPortal } from "@/lib/clients/roster-for-portal";
 import { createDraftForAgent, loadAgentWithKey, loadAgents, type ReplyAgent } from "./agent";
 import { selectAgentForThread, type SelectableAgent } from "./agent-config";
@@ -604,7 +604,7 @@ export async function assembleRunInput(
 
   const { data: thread } = await admin
     .from("threads")
-    .select("id, workspace_id, subject, channel_id, lead_id, client_id, outbound_sender_email")
+    .select("id, workspace_id, subject, channel_id, lead_id, client_id, outbound_sender_email, campaign_name")
     .eq("id", threadId)
     .eq("workspace_id", workspaceId)
     .maybeSingle();
@@ -693,7 +693,7 @@ export async function assembleRunInput(
   }
 
   const clientId = (thread.client_id as string | null) ?? null;
-  const introduction = await resolveIntroduction(clientId);
+  const introduction = await resolveIntroduction(clientId, (thread.campaign_name as string | null) ?? null);
 
   return {
     workspaceId,
@@ -729,7 +729,11 @@ export async function assembleRunInput(
  * assigned are all "nobody to introduce them to" rather than failures — the
  * handover stops with the reason, it does not throw inside a webhook.
  */
-export async function resolveIntroduction(clientId: string | null): Promise<IntroductionSource> {
+export async function resolveIntroduction(
+  clientId: string | null,
+  /** The lead's campaign: picks the people when the client has territories (6 Oct). */
+  campaignName: string | null = null,
+): Promise<IntroductionSource> {
   if (!clientId) {
     return { client: null, unavailableReason: "this conversation is not assigned to a client" };
   }
@@ -750,9 +754,7 @@ export async function resolveIntroduction(clientId: string | null): Promise<Intr
     const found = await rosterRowForPortal(
       clientId,
       (miClient?.name as string | undefined) ?? null,
-      "name, contact_name, contact_role, contact_email, " +
-        "contact2_name, contact2_role, contact2_email, " +
-        "contact3_name, contact3_role, contact3_email, brokerage, intro_override, more_contacts",
+      INTRO_ROW_COLUMNS,
     );
     if (found.error) throw new Error(found.error);
     row = found.row;
@@ -771,28 +773,9 @@ export async function resolveIntroduction(clientId: string | null): Promise<Intr
     };
   }
 
-  const str = (k: string) => (row?.[k] as string | null) ?? null;
   return {
-    client: {
-      name: (row.name as string | null) ?? clientName,
-      contactName: str("contact_name"),
-      contactRole: str("contact_role"),
-      contactEmail: str("contact_email"),
-      // The second and third people, when this client has them. Anyone without
-      // both a name and a role is ignored by the macro.
-      // People 2-3 from their columns, then 4+ from more_contacts (OS migration 0028).
-      extraContacts: [
-        ...[2, 3].map((n) => ({
-          name: str(`contact${n}_name`),
-          role: str(`contact${n}_role`),
-          email: str(`contact${n}_email`),
-        })),
-        ...moreContactsFrom(row?.more_contacts),
-      ],
-      brokerage: str("brokerage"),
-      // The client's own pasted introduction, when set (OS migration 0026).
-      introOverride: str("intro_override"),
-    },
+    // Only the people for this lead's territory, when the client has territories.
+    client: routeIntro(introClientFromRow(row, clientName), campaignName).client,
     unavailableReason: null,
   };
 }

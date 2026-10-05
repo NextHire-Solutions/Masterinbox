@@ -553,12 +553,25 @@ export function Composer({
       // mailbox that emailed the lead. No usable mailbox on this platform:
       // From is left alone and the reason is shown above Send.
       const s = introMacro.sender;
+      const notes: string[] = [];
+      let warn = false;
       if (s?.channelId) {
         setSelectedChannelId(s.channelId);
-        setIntroSenderNote({ text: `From is set to ${s.email} — introductions go out from this address.`, warn: false });
+        notes.push(`From is set to ${s.email} — introductions go out from this address.`);
       } else if (s?.problem) {
-        setIntroSenderNote({ text: `${s.problem} This introduction will go out from the campaign mailbox instead.`, warn: true });
+        notes.push(`${s.problem} This introduction will go out from the campaign mailbox instead.`);
+        warn = true;
       }
+      // By territory (6 Oct): say whose territory this lead is in, or that the
+      // campaign names none and everyone is introduced.
+      const r = introMacro.route;
+      if (r?.byTerritory && r.fallback) {
+        notes.push(`This lead's campaign names none of ${introMacro.clientName}'s territories, so everyone is introduced. Check Cc before sending.`);
+        warn = true;
+      } else if (r?.byTerritory) {
+        notes.push(`${r.matched.join(" / ")} territory: introducing ${joinNames(r.people)}.`);
+      }
+      setIntroSenderNote(notes.length ? { text: notes.join(" "), warn } : null);
 
       // What the lead does not have, worked out from the macro BEFORE
       // substitution emptied the gaps.
@@ -1343,9 +1356,16 @@ type IntroMacroState =
       introductionLabelId: string | null;
       /** The mailbox introductions go out from (Nicole), or why there is none here. */
       sender?: { email: string; channelId: string | null; problem: string | null };
+      /** Who this lead goes to when the client's people have territories (6 Oct). */
+      route?: { byTerritory: boolean; matched: string[]; fallback: boolean; people: string[] };
     }
   | { available: false; reason: string; clientName?: string }
   | null;
+
+/** "A", "A and B", "A, B and C". */
+function joinNames(names: string[]): string {
+  return names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
 
 function mergeRecipientStrings(existing: string, incoming: string): string {
   const seen = new Set<string>();

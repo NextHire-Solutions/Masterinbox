@@ -1,14 +1,16 @@
-import { moreContactsFrom } from "@/lib/inbox/intro-macro";
 import { NextResponse } from "next/server";
 import { rosterRowForPortal } from "@/lib/clients/roster-for-portal";
 import { requireSession } from "@/lib/auth/workspace";
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import { introSenderFor } from "@/lib/inbox/intro-sender";
 import {
+  INTRO_ROW_COLUMNS,
+  introClientFromRow,
   introReady,
   introText,
   introContactEmails,
   missingIntroFields,
+  routeIntro,
 } from "@/lib/inbox/intro-macro";
 
 /*
@@ -66,7 +68,7 @@ export async function GET(
 
   const { data: thread } = await admin
     .from("threads")
-    .select("id, client_id, source_provider")
+    .select("id, client_id, source_provider, campaign_name")
     .eq("id", threadId)
     .eq("workspace_id", session.activeWorkspace.id)
     .maybeSingle();
@@ -116,9 +118,7 @@ export async function GET(
     const found = await rosterRowForPortal(
       clientId,
       (client?.name as string | undefined) ?? null,
-      "name, contact_name, contact_role, contact_email, " +
-        "contact2_name, contact2_role, contact2_email, " +
-        "contact3_name, contact3_role, contact3_email, brokerage, intro_override, more_contacts",
+      INTRO_ROW_COLUMNS,
     );
     row = found.row;
   } catch {
@@ -126,27 +126,13 @@ export async function GET(
   }
 
   if (row) {
-    const str = (k: string) => (row?.[k] as string | null) ?? null;
-    const details = {
-      // The name shown to a person is THIS app's, not the roster's — they are
-      // spelled differently for five clients and this is the one people see.
-      name: clientName,
-      contactName: str("contact_name"),
-      contactRole: str("contact_role"),
-      contactEmail: str("contact_email"),
-      // People 2-3 from their columns, then 4+ from more_contacts (OS migration 0028).
-      extraContacts: [
-        ...[2, 3].map((n) => ({
-          name: str(`contact${n}_name`),
-          role: str(`contact${n}_role`),
-          email: str(`contact${n}_email`),
-        })),
-        ...moreContactsFrom(row?.more_contacts),
-      ],
-      brokerage: str("brokerage"),
-      // The client's own pasted introduction, when set (OS migration 0026).
-      introOverride: str("intro_override"),
-    };
+    // The name shown to a person is THIS app's, not the roster's — they are
+    // spelled differently for five clients and this is the one people see.
+    // Only the people for this lead's territory, when the client has territories.
+    const { client: details, route } = routeIntro(
+      { ...introClientFromRow(row, clientName), name: clientName },
+      (thread.campaign_name as string | null) ?? null,
+    );
 
     if (introReady(details)) {
       return NextResponse.json({
@@ -158,6 +144,8 @@ export async function GET(
         introductionLabelId,
         // Introductions go out from Nicole (Eddy, 5 Oct) — see lib/inbox/intro-sender.ts.
         sender: await introSenderFor(admin, session.activeWorkspace.id, (thread.source_provider as string | null) ?? "emailbison"),
+        // Who this lead goes to when the client's people have territories (6 Oct).
+        route,
       });
     }
 
