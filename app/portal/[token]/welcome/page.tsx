@@ -15,9 +15,9 @@ import { PortalLogo } from "@/components/portals/portal-logo";
 
 // First-impression landing page for the Client Portal.
 //
-// First-visit-per-session redirect from /portal/[token] sends the
-// brokerage here; afterwards the "Welcome" item in the sidebar
-// brings them back any time. Single-column, max-w-4xl, soft blue
+// The first page load of /portal/[token] each browser session is
+// redirected here on the server (lib/portals/welcome.ts); afterwards
+// the "Welcome" item in the sidebar brings them back any time. Single-column, max-w-4xl, soft blue
 // glow on the hero — same design language as the rest of the portal
 // but a touch warmer for the greeting.
 

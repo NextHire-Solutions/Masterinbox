@@ -1,4 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
+import { welcomedCookieName, welcomeToken } from "@/lib/portals/welcome";
 import { createServerClient } from "@supabase/ssr";
 
 // Hostname routing: portal.brokerstaffer.com serves client portals
@@ -109,6 +110,19 @@ export async function proxy(request: NextRequest) {
   // errors in Chrome on portal navigations), and the result isn't used
   // for portal pages anyway.
   if (pathname === "/portal" || pathname.startsWith("/portal/")) {
+    // Welcome seen this browser session: from now on /portal/<token> opens the
+    // pipeline instead of redirecting here. See lib/portals/welcome.ts.
+    const welcomed = welcomeToken(pathname);
+    if (welcomed) {
+      const res = NextResponse.next();
+      res.cookies.set(welcomedCookieName(welcomed), "1", {
+        path: `/portal/${welcomed}`,
+        httpOnly: true,
+        sameSite: "lax",
+        secure: request.nextUrl.protocol === "https:",
+      });
+      return res;
+    }
     return NextResponse.next();
   }
 

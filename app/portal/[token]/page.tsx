@@ -21,7 +21,9 @@ import {
 } from "@/components/portals/pipeline-header";
 import { PipelineBoard } from "@/components/portals/pipeline-board";
 import { PortalLogo } from "@/components/portals/portal-logo";
-import { WelcomeRedirect } from "@/components/portals/welcome-redirect";
+import { cookies, headers } from "next/headers";
+import { redirect } from "next/navigation";
+import { isInAppNavigation, welcomedCookieName } from "@/lib/portals/welcome";
 import {
   StageLabelsProvider,
   VisibleStagesProvider,
@@ -56,6 +58,17 @@ export default async function PortalRoot(props: {
   const { token } = await props.params;
   const client = await resolvePortalClient(token);
   if (!client) return <PortalNotFound />;
+
+  /*
+   * First page load this browser session goes straight to Welcome — decided
+   * here, before any pipeline data is read, so nothing flashes up first.
+   * Navigating inside the portal (sidebar, Welcome cards) is never redirected.
+   * An unknown or switched-off portal still gets "Portal not found" above.
+   */
+  const h = await headers();
+  if (!isInAppNavigation((n) => h.get(n)) && !(await cookies()).get(welcomedCookieName(token))) {
+    redirect(`/portal/${token}/welcome`);
+  }
 
   const [entries, teamMembers] = await Promise.all([
     loadPipelineEntries(client.id),
@@ -106,7 +119,6 @@ export default async function PortalRoot(props: {
     <StageLabelsProvider value={stageLabels}>
       <VisibleStagesProvider value={visibleStages}>
         <StageDefsProvider value={manageStagesEnabled ? manageStages ?? null : null}>
-        <WelcomeRedirect token={token} />
         <PipelineHeader clientName={client.name} />
         <PipelineBoard
           token={token}
