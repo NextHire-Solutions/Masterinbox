@@ -25,12 +25,15 @@ export async function rosterRowForPortal(
 ): Promise<{ row: Record<string, unknown> | null; error?: string }> {
   const admin = createAdminSupabase();
 
-  // `intro_override` (OS migration 0026) may not exist yet: ask again without it.
+  // Columns a migration may not have added yet — intro_override (0026),
+  // more_contacts (0028): ask again without whichever one is missing.
   let cols = columns;
   let linked = await admin.from("os_clients").select(cols).eq("mi_client_id", portalId).maybeSingle();
-  if (linked.error && /intro_override/.test(linked.error.message) && /intro_override/.test(cols)) {
-    cols = cols.replace(/,\s*intro_override/, "");
-    linked = await admin.from("os_clients").select(cols).eq("mi_client_id", portalId).maybeSingle();
+  for (const optional of ["intro_override", "more_contacts"]) {
+    if (linked.error && linked.error.message.includes(optional) && cols.includes(optional)) {
+      cols = cols.replace(new RegExp(`,\\s*${optional}`), "");
+      linked = await admin.from("os_clients").select(cols).eq("mi_client_id", portalId).maybeSingle();
+    }
   }
   if (linked.error) return { row: null, error: linked.error.message };
   if (linked.data) return { row: linked.data as unknown as Record<string, unknown> };

@@ -1,3 +1,4 @@
+import { moreContactsFrom } from "@/lib/inbox/intro-macro";
 import { NextResponse } from "next/server";
 import { rosterRowForPortal } from "@/lib/clients/roster-for-portal";
 import { requireSession } from "@/lib/auth/workspace";
@@ -117,7 +118,7 @@ export async function GET(
       (client?.name as string | undefined) ?? null,
       "name, contact_name, contact_role, contact_email, " +
         "contact2_name, contact2_role, contact2_email, " +
-        "contact3_name, contact3_role, contact3_email, brokerage, intro_override",
+        "contact3_name, contact3_role, contact3_email, brokerage, intro_override, more_contacts",
     );
     row = found.row;
   } catch {
@@ -133,11 +134,15 @@ export async function GET(
       contactName: str("contact_name"),
       contactRole: str("contact_role"),
       contactEmail: str("contact_email"),
-      extraContacts: [2, 3].map((n) => ({
-        name: str(`contact${n}_name`),
-        role: str(`contact${n}_role`),
-        email: str(`contact${n}_email`),
-      })),
+      // People 2-3 from their columns, then 4+ from more_contacts (OS migration 0028).
+      extraContacts: [
+        ...[2, 3].map((n) => ({
+          name: str(`contact${n}_name`),
+          role: str(`contact${n}_role`),
+          email: str(`contact${n}_email`),
+        })),
+        ...moreContactsFrom(row?.more_contacts),
+      ],
       brokerage: str("brokerage"),
       // The client's own pasted introduction, when set (OS migration 0026).
       introOverride: str("intro_override"),

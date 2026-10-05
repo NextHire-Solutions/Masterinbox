@@ -269,3 +269,23 @@ export function introText(client: IntroMacroClient): string {
 export function introReady(client: IntroMacroClient): boolean {
   return customIntro(client) !== null || hasIntroDetails(client);
 }
+
+/* ------------------------------------------------------------------------ */
+
+/** At most this many people per client — three columns, then the rest (0028). */
+export const MAX_INTRO_CONTACTS = 10;
+
+/**
+ * People 4 and up, from os_clients.more_contacts (OS migration 0028): an
+ * ordered list of { name, role, email }. Anything malformed is dropped rather
+ * than trusted, and the list is capped so 3 + these never exceeds the limit.
+ */
+export function moreContactsFrom(value: unknown): IntroMacroContact[] {
+  if (!Array.isArray(value)) return [];
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  return value
+    .filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+    .map((x) => ({ name: str(x.name), role: str(x.role), email: str(x.email) }))
+    .filter((x) => x.name || x.role || x.email)
+    .slice(0, MAX_INTRO_CONTACTS - 3);
+}
