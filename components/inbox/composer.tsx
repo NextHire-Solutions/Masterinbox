@@ -495,6 +495,8 @@ export function Composer({
    */
   const [introGaps, setIntroGaps] = useState<string[]>([]);
   const [introducing, setIntroducing] = useState(false);
+  // Set when Introduce switches From to Nicole, or cannot (see insertIntroduction).
+  const [introSenderNote, setIntroSenderNote] = useState<{ text: string; warn: boolean } | null>(null);
 
   useEffect(() => {
     if (mode !== "reply") return;
@@ -546,6 +548,17 @@ export function Composer({
       const hadDraft = bodyText.trim().length > 0;
       editorRef.current?.setContent(plainTextToHtml(resolved));
       introInsertedRef.current = resolved;
+
+      // Introductions go out from Nicole (Eddy, 5 Oct), not the campaign
+      // mailbox that emailed the lead. No usable mailbox on this platform:
+      // From is left alone and the reason is shown above Send.
+      const s = introMacro.sender;
+      if (s?.channelId) {
+        setSelectedChannelId(s.channelId);
+        setIntroSenderNote({ text: `From is set to ${s.email} — introductions go out from this address.`, warn: false });
+      } else if (s?.problem) {
+        setIntroSenderNote({ text: `${s.problem} This introduction will go out from the campaign mailbox instead.`, warn: true });
+      }
 
       // What the lead does not have, worked out from the macro BEFORE
       // substitution emptied the gaps.
@@ -1038,6 +1051,26 @@ export function Composer({
         would use for it. Dismissable, because the operator may well decide
         the sentence still reads fine.
       */}
+      {introSenderNote ? (
+        <div
+          role="status"
+          className={`mx-4 mb-2 rounded-md border px-3 py-2 text-xs leading-relaxed flex items-start gap-2 shrink-0 ${
+            introSenderNote.warn
+              ? "border-amber-500/40 bg-amber-500/10 text-amber-900 dark:text-amber-200"
+              : "border-sky-500/30 bg-sky-500/10 text-sky-900 dark:text-sky-200"
+          }`}
+        >
+          <span className="flex-1">{introSenderNote.text}</span>
+          <button
+            type="button"
+            onClick={() => setIntroSenderNote(null)}
+            aria-label="Dismiss"
+            className="shrink-0 rounded px-1 opacity-70 hover:opacity-100"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      ) : null}
       {introGaps.length > 0 ? (
         <div
           role="status"
@@ -1308,6 +1341,8 @@ type IntroMacroState =
       body: string;
       cc: string | null;
       introductionLabelId: string | null;
+      /** The mailbox introductions go out from (Nicole), or why there is none here. */
+      sender?: { email: string; channelId: string | null; problem: string | null };
     }
   | { available: false; reason: string; clientName?: string }
   | null;
@@ -1595,9 +1630,11 @@ function SenderPicker({
 
   // Display string for the trigger button — prefers the picked channel,
   // falls back to whatever the parent told us is the default sender.
+  // The address first: hundreds of EmailBison mailboxes share the display
+  // name "Nicole Collins", so the name alone cannot say which one sends (5 Oct).
   const triggerLabel =
-    selected?.display_name ?? defaultEmail ?? defaultName ?? "Choose sender";
-  const triggerSubLabel = selected ? "" : defaultName ?? "";
+    (selected ? selected.email ?? selected.display_name : null) ?? defaultEmail ?? defaultName ?? "Choose sender";
+  const triggerSubLabel = selected ? (selected.email ? selected.display_name : "") : defaultName ?? "";
 
   const filtered = filter.trim()
     ? (() => {

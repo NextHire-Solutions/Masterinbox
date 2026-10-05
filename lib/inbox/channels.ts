@@ -13,6 +13,9 @@ async function fetchChannels(workspaceId: string): Promise<ChannelRow[]> {
       "id, display_name, provider, type, instantly_account_id, external_account_id",
     )
     .eq("workspace_id", workspaceId)
+    // A disconnected mailbox cannot send; offering it in From only produced
+    // failed sends (Nicole's dead Instantly and EmailBison #611 rows, 5 Oct).
+    .neq("status", "disconnected")
     .order("display_name", { ascending: true });
 
   if (error) {

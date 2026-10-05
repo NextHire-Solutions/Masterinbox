@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { rosterRowForPortal } from "@/lib/clients/roster-for-portal";
 import { requireSession } from "@/lib/auth/workspace";
 import { createAdminSupabase } from "@/lib/supabase/admin";
+import { introSenderFor } from "@/lib/inbox/intro-sender";
 import {
   introReady,
   introText,
@@ -64,7 +65,7 @@ export async function GET(
 
   const { data: thread } = await admin
     .from("threads")
-    .select("id, client_id")
+    .select("id, client_id, source_provider")
     .eq("id", threadId)
     .eq("workspace_id", session.activeWorkspace.id)
     .maybeSingle();
@@ -150,6 +151,8 @@ export async function GET(
         bodyHtml: null,
         cc: introContactEmails(details).join(", ") || null,
         introductionLabelId,
+        // Introductions go out from Nicole (Eddy, 5 Oct) — see lib/inbox/intro-sender.ts.
+        sender: await introSenderFor(admin, session.activeWorkspace.id, (thread.source_provider as string | null) ?? "emailbison"),
       });
     }
 
@@ -191,5 +194,6 @@ export async function GET(
     bodyHtml: (template.body_html as string | null) ?? null,
     cc: ((template.cc as string | null) ?? "").trim() || null,
     introductionLabelId,
+    sender: await introSenderFor(admin, session.activeWorkspace.id, (thread.source_provider as string | null) ?? "emailbison"),
   });
 }

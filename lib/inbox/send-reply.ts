@@ -191,7 +191,7 @@ export async function sendOutboundReply(input: SendOutboundReplyInput): Promise<
     const { data: ch } = await admin
       .from("channels")
       .select(
-        "id, workspace_id, provider, display_name, emailbison_sender_email_id, instantly_account_id, emailbison_team_id",
+        "id, workspace_id, provider, display_name, emailbison_sender_email_id, instantly_account_id, emailbison_team_id, status",
       )
       .eq("id", payload.sender_channel_id)
       .eq("workspace_id", thread.workspace_id)
@@ -201,6 +201,13 @@ export async function sendOutboundReply(input: SendOutboundReplyInput): Promise<
         ok: false,
         status: 400,
         body: { error: "Selected sender channel not found in this workspace." },
+      };
+    }
+    if ((ch.status as string | null) === "disconnected") {
+      return {
+        ok: false,
+        status: 400,
+        body: { error: `${ch.display_name ?? "That mailbox"} is disconnected and cannot send. Choose another From.` },
       };
     }
     const ebId = ch.emailbison_sender_email_id as string | null;
@@ -687,7 +694,14 @@ async function sendInstantlyReply(args: {
       return {
         ok: false,
         status: 502,
-        body: { error: err.message, status: err.status, detail },
+        // Instantly answers a disconnected mailbox with a bare "auth failed"; say what it means.
+        body: {
+          error: /auth/i.test(`${err.message} ${detail ?? ""}`)
+            ? `${outboundSenderEmail ?? "This mailbox"} is disconnected in Instantly, so Instantly refused the send. Reconnect it in Instantly, or choose another From. (${err.message})`
+            : err.message,
+          status: err.status,
+          detail,
+        },
       };
     }
     console.error("[reply] Instantly send failed", err);
