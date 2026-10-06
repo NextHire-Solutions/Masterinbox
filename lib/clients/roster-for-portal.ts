@@ -18,7 +18,7 @@ import { createAdminSupabase } from "@/lib/supabase/admin";
  */
 const norm = (s: string | null | undefined) => (s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
-const OPTIONAL_COLUMNS = ["intro_override", "more_contacts", "contact_territories"];
+const OPTIONAL_COLUMNS = ["intro_override", "more_contacts", "contact_territories", "intro_variants"];
 
 export async function rosterRowForPortal(
   portalId: string,

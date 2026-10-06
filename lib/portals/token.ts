@@ -1,6 +1,7 @@
 import { cache } from "react";
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import { CLIENT_PORTALS_ENABLED } from "@/lib/portals/flag";
+import { portalBillingHold } from "@/lib/portals/billing-hold";
 
 // Resolves a /portal/<token> token to a client. The token IS the
 // credential — every public portal page and edit API uses this to gate
@@ -42,8 +43,13 @@ export interface PortalClient {
   ideal_agent_profile: Record<string, unknown>;
 }
 
-export const resolvePortalClient = cache(
-  async function resolvePortalClient(
+/*
+ * The portal behind a token, whether or not it is held for an unpaid invoice.
+ * Only the portal layout uses this directly — to show the "paused" page.
+ * Everything else uses resolvePortalClient below, which refuses a held one.
+ */
+export const resolvePortalRow = cache(
+  async function resolvePortalRow(
     token: string,
   ): Promise<PortalClient | null> {
     if (!CLIENT_PORTALS_ENABLED) return null;
@@ -124,6 +130,21 @@ export const resolvePortalClient = cache(
           ? (rawIdeal as Record<string, unknown>)
           : {},
     };
+  },
+);
+
+/**
+ * The portal for a token — null when there is none, it is switched off, or it
+ * is held for an unpaid invoice (os_portal_blocks, mode 'blocked'; see
+ * billing-hold.ts, which fails open). Every portal page and API gates on this,
+ * so a held portal serves no data.
+ */
+export const resolvePortalClient = cache(
+  async function resolvePortalClient(token: string): Promise<PortalClient | null> {
+    const client = await resolvePortalRow(token);
+    if (!client) return null;
+    if (await portalBillingHold(client.id)) return null;
+    return client;
   },
 );
 

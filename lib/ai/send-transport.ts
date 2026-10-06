@@ -94,6 +94,12 @@ export interface OutboundAgentReply {
   body: string;
   /** True when this is the qualifying reply that hands the lead over. */
   isHandover: boolean;
+  /**
+   * The introduction's subject, "Intro: {lead first name} & {brokerage}"
+   * (6 Oct) — the Introduce button's. Set only on the handover; it is sent as
+   * a changed subject, which EmailBison delivers as a new email.
+   */
+  introSubject?: string | null;
 }
 
 export type TransportResult =
@@ -185,8 +191,8 @@ export async function dispatch(reply: OutboundAgentReply): Promise<TransportResu
       workspaceId: reply.workspaceId,
       threadId: reply.threadId,
       body: { kind: "html", html: agentBodyHtml(reply.body) },
-      subject: agentSubject(reply.subject),
-      subjectChanged: false,
+      subject: reply.isHandover && reply.introSubject ? reply.introSubject : agentSubject(reply.subject),
+      subjectChanged: !!(reply.isHandover && reply.introSubject),
       to,
       cc,
       bcc: undefined,

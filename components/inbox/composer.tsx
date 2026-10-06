@@ -32,6 +32,8 @@ import {
 } from "@/lib/inbox/template-variables";
 import { mergeAlwaysCcString } from "@/lib/inbox/auto-cc";
 import { introWasSent } from "@/lib/inbox/intro-send-guard";
+import { fitIntroToLead, introSubject } from "@/lib/inbox/intro-macro";
+import { withOpener } from "@/lib/inbox/intro-opener";
 import {
   ComposerBodyEditor,
   type ComposerBodyHandle,
@@ -484,6 +486,9 @@ export function Composer({
    * editor's effects mid-draft.
    */
   const introInsertedRef = useRef<string | null>(null);
+  // After Introduce: offer one opening line from the lead's own reply (6 Oct, opt-in).
+  const [introDone, setIntroDone] = useState(false);
+  const [openerBusy, setOpenerBusy] = useState(false);
   /*
    * Values the introduction asked for and the lead does not have.
    *
@@ -519,10 +524,7 @@ export function Composer({
     if (!introMacro?.available || introducing) return;
     setIntroducing(true);
     try {
-      // The same substitution the Templates picker performs, so an
-      // introduction put in by this button and one chosen from the picker read
-      // identically.
-      const resolved = substituteVariables(introMacro.body, {
+      const vars = {
         lead: {
           name: toName ?? null,
           email: toEmail,
@@ -532,7 +534,13 @@ export function Composer({
         },
         thread: { subject: composerSubject },
         sender: { name: fromName ?? null, email: fromEmail ?? null },
-      });
+      };
+      // A lead with no phone (or brokerage) gets the sentence rewritten, not a
+      // blank (6 Oct) — then the same substitution the Templates picker
+      // performs, so an introduction put in by this button and one chosen
+      // from the picker read identically.
+      const template = fitIntroToLead(introMacro.body, { phone: leadPhone, company: leadCompany });
+      const resolved = substituteVariables(template, vars);
       /*
        * The introduction REPLACES the draft rather than joining it.
        *
@@ -548,6 +556,7 @@ export function Composer({
       const hadDraft = bodyText.trim().length > 0;
       editorRef.current?.setContent(plainTextToHtml(resolved));
       introInsertedRef.current = resolved;
+      setIntroDone(true);
 
       // Introductions go out from Nicole (Eddy, 5 Oct), not the campaign
       // mailbox that emailed the lead. No usable mailbox on this platform:
@@ -571,23 +580,22 @@ export function Composer({
       } else if (r?.byTerritory) {
         notes.push(`${r.matched.join(" / ")} territory: introducing ${joinNames(r.people)}.`);
       }
+      // Wording by market or person (6 Oct): say which.
+      if (r?.variant) notes.push(`Using ${introMacro.clientName}'s "${r.variant}" introduction.`);
       setIntroSenderNote(notes.length ? { text: notes.join(" "), warn } : null);
 
       // What the lead does not have, worked out from the macro BEFORE
-      // substitution emptied the gaps.
-      setIntroGaps(
-        missingVariables(introMacro.body, {
-          lead: {
-            name: toName ?? null,
-            email: toEmail,
-            phone: leadPhone,
-            company: leadCompany,
-            title: leadTitle,
-          },
-          thread: { subject: composerSubject },
-          sender: { name: fromName ?? null, email: fromEmail ?? null },
-        }),
-      );
+      // substitution emptied the gaps (a missing phone has been written out).
+      setIntroGaps(missingVariables(template, vars));
+      /*
+       * The subject (6 Oct): "Intro: {lead first name} & {brokerage}". On
+       * EmailBison a changed subject goes out as a new email (the reply
+       * endpoint drops subjects); Instantly keeps the thread. Replies still
+       * reach this conversation's client.
+       */
+      if (introMacro.brokerage) {
+        setComposerSubject(introSubject(introMacro.brokerage, substituteVariables("{{lead.first_name}}", vars)));
+      }
       const introCc = introMacro.cc;
       if (introCc) {
         // Merge, never replace — what is already in Cc stays.
@@ -605,6 +613,32 @@ export function Composer({
       );
     } finally {
       setIntroducing(false);
+    }
+  }
+
+  /*
+   * One opening line from the lead's latest reply, under the greeting (6 Oct).
+   * Opt-in and read-only on the server; the operator reads it in the draft.
+   * Built on exactly what Introduce inserted when the body is still that, so
+   * nothing is reformatted; otherwise on the body as it now reads.
+   */
+  async function addOpenerLine() {
+    if (openerBusy) return;
+    setOpenerBusy(true);
+    try {
+      const res = await fetch(`/api/threads/${threadId}/intro-opener`, { method: "POST" });
+      const j = (await res.json().catch(() => null)) as { line?: string | null; reason?: string; error?: string } | null;
+      if (!res.ok || !j) throw new Error(j?.error ?? `HTTP ${res.status}`);
+      if (!j.line) { toast(j.reason ?? "No line to add."); return; }
+      const norm = (t: string) => t.replace(/\s+/g, " ").trim();
+      const inserted = introInsertedRef.current;
+      const base = inserted && norm(bodyText) === norm(inserted) ? inserted : bodyText;
+      editorRef.current?.setContent(plainTextToHtml(withOpener(base, j.line)));
+      toast.success("Added a line from their reply — read it before sending.");
+    } catch (e) {
+      toast.error(`Could not add the line: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setOpenerBusy(false);
     }
   }
 
@@ -1159,6 +1193,19 @@ export function Composer({
               Introduce
             </button>
           ) : null}
+          {mode === "reply" && introDone ? (
+            <button
+              type="button"
+              onClick={() => void addOpenerLine()}
+              disabled={openerBusy}
+              aria-label="Add an opening line from the lead's reply"
+              title="Writes one sentence picking up on what the lead said, under the greeting. Read it before sending."
+              className="h-8 px-2 inline-flex items-center gap-1.5 rounded-md border bg-background text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {openerBusy ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
+              Line from their reply
+            </button>
+          ) : null}
           <TemplatePicker
             substitutionContext={{
               lead: {
@@ -1352,12 +1399,14 @@ type IntroMacroState =
       available: true;
       clientName: string;
       body: string;
+      /** The brokerage the "Intro: …" subject names. Absent from an older server. */
+      brokerage?: string;
       cc: string | null;
       introductionLabelId: string | null;
       /** The mailbox introductions go out from (Nicole), or why there is none here. */
       sender?: { email: string; channelId: string | null; problem: string | null };
       /** Who this lead goes to when the client's people have territories (6 Oct). */
-      route?: { byTerritory: boolean; matched: string[]; fallback: boolean; people: string[] };
+      route?: { byTerritory: boolean; matched: string[]; fallback: boolean; people: string[]; variant?: string | null };
     }
   | { available: false; reason: string; clientName?: string }
   | null;

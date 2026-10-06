@@ -5,6 +5,7 @@ import { createAdminSupabase } from "@/lib/supabase/admin";
 import { introSenderFor } from "@/lib/inbox/intro-sender";
 import {
   INTRO_ROW_COLUMNS,
+  introBrokerage,
   introClientFromRow,
   introReady,
   introText,
@@ -140,6 +141,8 @@ export async function GET(
         clientName,
         body: introText(details),
         bodyHtml: null,
+        // "Intro: {lead first name} & {brokerage}" (6 Oct).
+        brokerage: introBrokerage(details),
         cc: introContactEmails(details).join(", ") || null,
         introductionLabelId,
         // Introductions go out from Nicole (Eddy, 5 Oct) — see lib/inbox/intro-sender.ts.
@@ -185,6 +188,7 @@ export async function GET(
     clientName,
     body: template.body as string,
     bodyHtml: (template.body_html as string | null) ?? null,
+    brokerage: clientName,
     cc: ((template.cc as string | null) ?? "").trim() || null,
     introductionLabelId,
     sender: await introSenderFor(admin, session.activeWorkspace.id, (thread.source_provider as string | null) ?? "emailbison"),

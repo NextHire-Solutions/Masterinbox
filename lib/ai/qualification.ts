@@ -36,8 +36,11 @@
 
 import type { AgentHandover, AgentQualification, QualificationQuestion } from "./agent-config";
 import {
+  fitIntroToLead,
   hasIntroDetails,
+  introBrokerage,
   introContactEmails,
+  introSubject,
   renderIntroMacroTemplate,
   introReady,
   introText,
@@ -234,6 +237,8 @@ export type HandoverPlan =
       cc: string[];
       /** Whether the body came from the macro or from the agent's override text. */
       source: "macro" | "override";
+      /** "Intro: {lead first name} & {brokerage}" — the button's subject (6 Oct). */
+      subject: string;
     }
   | {
       /** No introduction can be written. The thread stops; a person picks it up. */
@@ -305,7 +310,9 @@ export function planHandover(handover: AgentHandover, ctx: HandoverContext): Han
 
   return {
     kind: "introduce",
-    body: substituteVariables(template, ctx.variables),
+    // A lead with no phone gets the sentence rewritten, not a blank (6 Oct).
+    body: substituteVariables(fitIntroToLead(template, ctx.variables.lead), ctx.variables),
+    subject: introSubject(introBrokerage(ctx.client), substituteVariables("{{lead.first_name}}", ctx.variables)),
     cc: mergeCc(introContactEmails(ctx.client), handover.ccEmails),
     source: override.length > 0 ? "override" : "macro",
   };

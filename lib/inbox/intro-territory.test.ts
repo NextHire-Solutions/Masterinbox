@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { renderIntroMacroTemplate } from "./intro-macro.ts";
+import { renderIntroMacroTemplate } from "./intro-macro";
 /* ---------------------------------------------------------------- territories (6 Oct) --- */
-import { routeIntro, campaignCovers, slotTerritories, territoriesFrom, introContactEmails, moreContactsFrom } from "./intro-macro.ts";
+import { routeIntro, campaignCovers, slotTerritories, territoriesFrom, introContactEmails, moreContactsFrom } from "./intro-macro";
 
 const jeff = {
   name: "Jeff Cook Real Estate",
@@ -81,7 +81,7 @@ test("territories: stored values are cleaned, and people 1-3 read by slot", () =
 });
 
 test("territories: a stored row maps to the same client the button and the agent use", async () => {
-  const { introClientFromRow } = await import("./intro-macro.ts");
+  const { introClientFromRow } = await import("./intro-macro");
   const c = introClientFromRow({
     name: "Jeff Cook Real Estate", contact_name: "Alma Nowatzke", contact_role: "Talent Specialist", contact_email: "alma@jc.test",
     contact2_name: "Angela Oakes", contact2_role: "Growth Advisor", contact2_email: "angela@jc.test",
@@ -95,4 +95,71 @@ test("territories: a stored row maps to the same client the button and the agent
   // Before 0029 (no contact_territories column): everyone, as today.
   const old = introClientFromRow({ name: "Jeff Cook Real Estate", contact_name: "Alma Nowatzke", contact_role: "Talent Specialist" }, "x");
   assert.equal(routeIntro(old, "JC + Greenville").route.byTerritory, false);
+});
+
+/* ---- 6 Oct: subject, a lead with no phone, wording by market or person ---- */
+import { fitIntroToLead, introSubject, introBrokerage, introVariantsFrom, pickIntroVariant, renderIntroMacroTemplate as renderStd } from "./intro-macro";
+
+test("intro subject: Intro: first name & brokerage, never a hole", () => {
+  assert.equal(introSubject("Jeff Cook Real Estate", "Gisele"), "Intro: Gisele & Jeff Cook Real Estate");
+  assert.equal(introSubject("Oz Group", ""), "Intro: Oz Group");
+  assert.equal(introSubject("Oz Group", null), "Intro: Oz Group");
+  assert.equal(introBrokerage({ brokerage: " ", name: "The Karp Group" }), "The Karp Group");
+});
+
+test("no phone: the standard sentence is rewritten, not left with a blank", () => {
+  const tpl = renderStd({ name: "Oz", contactName: "Nicole Collins", contactRole: "Team Leader", brokerage: "Oz Group" });
+  const line = (t: string) => t.split("\n").find((l) => l.includes("I recently connected"))!;
+  assert.equal(fitIntroToLead(tpl, { phone: "555", company: "Compass" }), tpl, "nothing missing: untouched");
+  assert.equal(line(fitIntroToLead(tpl, { phone: "", company: "Compass" })), "Nicole, I recently connected with {{lead.first_name}}, who is currently with {{lead.company}}.");
+  assert.equal(line(fitIntroToLead(tpl, { phone: "555", company: null })), "Nicole, I recently connected with {{lead.first_name}}, who can be reached directly at {{lead.phone_number}}.");
+  assert.equal(line(fitIntroToLead(tpl, { phone: null, company: " " })), "Nicole, I recently connected with {{lead.first_name}}.");
+  assert.ok(!fitIntroToLead(tpl, {}).includes("phone_number"));
+});
+
+test("no phone: the clients' own phrasings", () => {
+  const own = "Hey {{lead.first_name}},\n\nJustin and Ananda, I recently connected with {{lead.first_name}}, who is currently with {{lead.company}}.\n\n{{lead.first_name}} can be reached directly at {{lead.phone_number}}.\n\n{{lead.first_name}}, Justin will be in touch.";
+  assert.equal(fitIntroToLead(own, { company: "Compass" }),
+    "Hey {{lead.first_name}},\n\nJustin and Ananda, I recently connected with {{lead.first_name}}, who is currently with {{lead.company}}.\n\n{{lead.first_name}}, Justin will be in touch.");
+  assert.equal(fitIntroToLead("I met {{lead.first_name}}, who can be reached directly to {{lead.phone_number}}. Next.", { company: "x" }), "I met {{lead.first_name}}. Next.");
+  assert.equal(fitIntroToLead("with {{lead.first_name}}, who can be reached directly at  {{lead.phone_number}} and is currently with {{lead.company}}.", { company: "x" }),
+    "with {{lead.first_name}}, who is currently with {{lead.company}}.");
+  assert.equal(fitIntroToLead("Text with no phone field.", {}), "Text with no phone field.");
+});
+
+test("variants: by place in the campaign name, by routed person, first wins, none → usual", () => {
+  const vs = introVariantsFrom([
+    { id: "a", label: "Charleston", places: ["Charleston"], people: [], text: "CHS intro" },
+    { id: "b", places: [], people: ["Angela Oakes"], text: "Angela intro" },
+    { id: "bad", places: [], people: [], text: "no target" },
+    { id: "blank", places: ["Columbia"], text: "  " },
+  ]);
+  assert.deepEqual(vs.map((v) => v.id), ["a", "b"], "a variant needs text and a place or a person");
+  const routed = { byTerritory: true, fallback: false, people: ["Angela Oakes"] };
+  assert.equal(pickIntroVariant(vs, "JC + Charleston, SC + ZF", routed)?.id, "a");
+  assert.equal(pickIntroVariant(vs, "JC + Charlotte", routed)?.id, "b");
+  assert.equal(pickIntroVariant(vs, "Interested ZF", { byTerritory: true, fallback: true, people: ["Angela Oakes", "Alma"] }), null, "everyone introduced: a person variant does not apply");
+  assert.equal(pickIntroVariant(vs, "Oz + Columbia", { byTerritory: false, fallback: false, people: ["Angela Oakes"] }), null);
+});
+
+test("routeIntro: the variant's wording replaces the client's usual intro for that lead only", () => {
+  const client = {
+    name: "Jeff Cook", contactName: "Angela Oakes", contactRole: "Growth Advisor", brokerage: "Jeff Cook Real Estate",
+    contactTerritories: ["Charlotte"], introOverride: "usual",
+    extraContacts: [{ name: "Stewart Samples", role: "Management Team", territories: ["Columbia"] }],
+    introVariants: introVariantsFrom([{ id: "c", label: "Columbia", places: ["Columbia"], text: "Columbia wording" }]),
+  };
+  const col = routeIntro(client, "Jeff Cook Real Estate + Columbia + ZF");
+  assert.equal(col.client.introOverride, "Columbia wording");
+  assert.equal(col.route.variant, "Columbia");
+  assert.deepEqual(col.route.people, ["Stewart Samples"]);
+  const clt = routeIntro(client, "Jeff Cook Real Estate + Charlotte + ZF");
+  assert.equal(clt.client.introOverride, "usual");
+  assert.equal(clt.route.variant, null);
+});
+
+test("a lead's company ending in a full stop does not get a second one", () => {
+  const t = "with {{lead.first_name}}, who can be reached directly at {{lead.phone_number}} and is currently with {{lead.company}}.\n\nNext.";
+  assert.equal(fitIntroToLead(t, { phone: "1", company: "InterCoast Properties, Inc." }), t.replace("{{lead.company}}.", "{{lead.company}}"));
+  assert.equal(fitIntroToLead(t, { phone: "1", company: "Compass" }), t);
 });

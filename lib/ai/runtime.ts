@@ -122,6 +122,8 @@ export interface HandoverSummary {
   /** Everyone who WOULD be copied in. In shadow nothing is sent, so this is the record of it. */
   cc: string[];
   source: "macro" | "override";
+  /** The introduction's own subject (6 Oct). */
+  subject?: string;
 }
 
 export type RunAgentOutcome =
@@ -327,7 +329,7 @@ export async function runReplyAgentOnInbound(input: RunAgentInput): Promise<RunA
   }
   const handover: HandoverSummary | undefined =
     handoverPlan && handoverPlan.kind === "introduce"
-      ? { body: handoverPlan.body, cc: handoverPlan.cc, source: handoverPlan.source }
+      ? { body: handoverPlan.body, cc: handoverPlan.cc, source: handoverPlan.source, subject: handoverPlan.subject }
       : undefined;
 
   // ---- 4. write the reply -------------------------------------------------
@@ -492,6 +494,7 @@ export async function runReplyAgentOnInbound(input: RunAgentInput): Promise<RunA
     lastInboundText: input.inboundText,
     isHandover: intent === "handover",
     cc: handover?.cc ?? [],
+    introSubject: handover?.subject ?? null,
     leadName: input.leadName,
     state: stored,
     now,

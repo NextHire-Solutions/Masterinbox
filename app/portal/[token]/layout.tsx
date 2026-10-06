@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { resolvePortalClient } from "@/lib/portals/token";
+import { resolvePortalRow } from "@/lib/portals/token";
+import { portalBillingHold } from "@/lib/portals/billing-hold";
+import { PortalBillingHold } from "@/components/portals/billing-hold";
 import { loadPortalCounts } from "@/lib/portals/portal-data";
 import { clientHasFeature } from "@/lib/portals/feature-flags";
 import { PortalShell } from "@/components/portals/portal-shell";
@@ -68,13 +70,20 @@ export default async function PortalTokenLayout(props: {
   params: Promise<{ token: string }>;
 }) {
   const { token } = await props.params;
-  const client = await resolvePortalClient(token);
+  const client = await resolvePortalRow(token);
   if (!client) {
     // /portal/[token]/page.tsx renders its own "Portal not found" screen
     // for the root URL. For sub-routes (pipeline/agents/dnc/team) a
     // missing token is a hard 404 — there's no content to render.
     notFound();
   }
+  /*
+   * Held for an unpaid invoice (BrokerStaffer OS, 6 Oct): the notice, not the
+   * pipeline. Only 'blocked' rows count, and the check fails open.
+   */
+  const hold = await portalBillingHold(client.id);
+  if (hold) return <PortalBillingHold clientName={client.name} hold={hold} />;
+
   const counts = await loadPortalCounts(client.id);
 
   // Demo Portal is our internal QA surface, exclude it so our own

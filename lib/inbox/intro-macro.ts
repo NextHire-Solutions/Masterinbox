@@ -80,6 +80,8 @@ export interface IntroMacroClient {
   introOverride?: string | null;
   /** The first contact's territories (os_clients.contact_territories, 0029). See `routeIntro`. */
   contactTerritories?: string[] | null;
+  /** Wording by market or person (os_clients.intro_variants, 0030). See `pickIntroVariant`. */
+  introVariants?: IntroVariant[] | null;
 }
 
 /** One of the people an agent is introduced to. */
@@ -363,6 +365,8 @@ export interface IntroRoute {
   fallback: boolean;
   /** Who this lead is introduced to, by name, in order. */
   people: string[];
+  /** The wording variant this lead gets (its label or places), or null for the client's usual intro. */
+  variant?: string | null;
 }
 
 /**
@@ -375,6 +379,20 @@ export interface IntroRoute {
  * wording, the Cc and the reply agent's handover need no change of their own.
  */
 export function routeIntro(
+  client: IntroMacroClient,
+  campaignName: string | null | undefined,
+): { client: IntroMacroClient; route: IntroRoute } {
+  const routed = routePeople(client, campaignName);
+  const picked = pickIntroVariant(client.introVariants ?? [], campaignName, routed.route);
+  if (!picked) return { client: routed.client, route: { ...routed.route, variant: null } };
+  return {
+    client: { ...routed.client, introOverride: picked.text },
+    route: { ...routed.route, variant: variantName(picked) },
+  };
+}
+
+/** Who the lead is introduced to, by territory — `routeIntro` before any wording variant. */
+function routePeople(
   client: IntroMacroClient,
   campaignName: string | null | undefined,
 ): { client: IntroMacroClient; route: IntroRoute } {
@@ -410,7 +428,7 @@ export function routeIntro(
 export const INTRO_ROW_COLUMNS =
   "name, contact_name, contact_role, contact_email, " +
   "contact2_name, contact2_role, contact2_email, " +
-  "contact3_name, contact3_role, contact3_email, brokerage, intro_override, more_contacts, contact_territories";
+  "contact3_name, contact3_role, contact3_email, brokerage, intro_override, more_contacts, contact_territories, intro_variants";
 
 /**
  * An os_clients row as the macro needs it: person 1, people 2-3 from their
@@ -437,5 +455,134 @@ export function introClientFromRow(row: Record<string, unknown>, fallbackName: s
     ],
     brokerage: str("brokerage"),
     introOverride: str("intro_override"),
+    introVariants: introVariantsFrom(row.intro_variants),
   };
+}
+
+/* ------------------------------------------------------------------------ */
+/*
+ * WORDING BY MARKET OR PERSON (client feedback, 6 Oct; os_clients.intro_variants,
+ * OS migration 0030).
+ *
+ * A client may want one introduction for Charleston leads and another for
+ * Columbia's, or a different one whenever Angela is the person introduced.
+ * Each variant names the places it is for (matched against the lead's
+ * campaign name, exactly as territories are) and/or the people it is for, and
+ * the first variant that fits wins. None fits: the client's usual intro.
+ *
+ * A person-based variant applies only when the lead was routed to that person
+ * by territory. When the campaign names no territory everyone is introduced,
+ * and "Angela is among everyone" says nothing about this lead.
+ */
+
+export interface IntroVariant {
+  id: string;
+  /** What the team calls it: "Charleston". Optional. */
+  label: string | null;
+  /** Places matched against the campaign name. */
+  places: string[];
+  /** People it is for, by name. */
+  people: string[];
+  /** The introduction, with the same {{lead.*}} / {{sender.*}} fields. */
+  text: string;
+}
+
+export const MAX_INTRO_VARIANTS = 20;
+export const MAX_INTRO_VARIANT_TEXT = 5000;
+
+/** os_clients.intro_variants, cleaned: malformed entries and blank texts dropped, capped. */
+export function introVariantsFrom(value: unknown): IntroVariant[] {
+  if (!Array.isArray(value)) return [];
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const out: IntroVariant[] = [];
+  value.forEach((x, i) => {
+    if (!x || typeof x !== "object") return;
+    const r = x as Record<string, unknown>;
+    const text = typeof r.text === "string" ? r.text.replace(/\r\n/g, "\n").trim().slice(0, MAX_INTRO_VARIANT_TEXT) : "";
+    const places = territoriesFrom(r.places);
+    const people = territoriesFrom(r.people);
+    if (!text || (!places.length && !people.length)) return;
+    out.push({ id: str(r.id) ?? `v${i + 1}`, label: str(r.label), places, people, text });
+  });
+  return out.slice(0, MAX_INTRO_VARIANTS);
+}
+
+/** How a variant is named to the team: its label, else its places and people. */
+export function variantName(v: IntroVariant): string {
+  return v.label ?? [...v.places, ...v.people].join(", ");
+}
+
+/** The variant this lead gets, or null. See the section comment for the person rule. */
+export function pickIntroVariant(
+  variants: IntroVariant[],
+  campaignName: string | null | undefined,
+  route: Pick<IntroRoute, "byTerritory" | "fallback" | "people">,
+): IntroVariant | null {
+  const routedTo = route.byTerritory && !route.fallback ? route.people.map(placeKey) : [];
+  for (const v of variants) {
+    if (v.places.some((p) => campaignCovers(campaignName, p))) return v;
+    if (v.people.some((p) => routedTo.includes(placeKey(p)))) return v;
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------------ */
+/*
+ * THE SUBJECT (client feedback, 6 Oct): "Intro: {Lead First Name} & {Client
+ * Brokerage}". With no first name for the lead, just the brokerage — never
+ * "Intro:  & Oz Group".
+ */
+
+/** The brokerage an introduction names: the client's, else the client's name. */
+export function introBrokerage(client: Pick<IntroMacroClient, "brokerage" | "name">): string {
+  return (client.brokerage ?? "").trim() || client.name.trim();
+}
+
+export function introSubject(brokerage: string, leadFirstName: string | null | undefined): string {
+  const first = (leadFirstName ?? "").trim();
+  const b = brokerage.trim();
+  return first ? `Intro: ${first} & ${b}` : `Intro: ${b}`;
+}
+
+/* ------------------------------------------------------------------------ */
+/*
+ * A LEAD WITH NO PHONE (client feedback, 6 Oct): the sentence is rewritten
+ * rather than left with a hole — "who can be reached directly at  and is
+ * currently with Compass" becomes "who is currently with Compass". Covers the
+ * standard wording and the four ways the clients' own intros phrase it; any
+ * other gap is still filled with nothing and named above Send.
+ *
+ * Works on the TEMPLATE, before substitution, so the composer can still list
+ * what is missing from what is left.
+ */
+const PHONE = String.raw`\{\{\s*lead\.phone_number\s*\}\}`;
+const COMPANY = String.raw`\{\{\s*lead\.company\s*\}\}`;
+
+export function fitIntroToLead(
+  template: string,
+  lead: { name?: string | null; email?: string | null; phone?: string | null; company?: string | null; title?: string | null } | null | undefined,
+): string {
+  const phone = !!(lead?.phone ?? "").trim();
+  const company = !!(lead?.company ?? "").trim();
+  let t = template;
+  // "InterCoast Properties, Inc." ending a sentence: one full stop, not two.
+  if (/\.\s*$/.test(lead?.company ?? "")) t = t.replace(new RegExp(`(${COMPANY})\\.`, "g"), "$1");
+  if (phone && company) return t;
+  // ", who can be reached directly at {{phone}} and is currently with {{company}}"
+  t = t.replace(new RegExp(String.raw`(,?)\s*who can be reached directly (?:at|to)\s+${PHONE}\s+and is currently with\s+${COMPANY}`, "gi"),
+    (_m, comma: string) =>
+      phone ? `${comma} who can be reached directly at {{lead.phone_number}}`
+        : company ? `${comma} who is currently with {{lead.company}}`
+          : "");
+  if (!phone) {
+    // ", who can be reached directly at {{phone}}" closing a sentence.
+    t = t.replace(new RegExp(String.raw`,?\s*who can be reached directly (?:at|to)\s+${PHONE}(?=\s*[.!])`, "gi"), "");
+    // A sentence of its own: "{{lead.first_name}} can be reached directly at {{phone}}."
+    // (A field like {{lead.first_name}} has a dot inside it, so fields are stepped over whole.)
+    t = t.replace(new RegExp(String.raw`(?:\{\{[^}]*\}\}|[^\n.!?{}])*\bcan be reached directly (?:at|to)\s+${PHONE}\s*[.!]?[ \t]*`, "gi"), "");
+  }
+  if (!company) {
+    t = t.replace(new RegExp(String.raw`,?\s*who is currently with\s+${COMPANY}(?=\s*[.!])`, "gi"), "");
+  }
+  return t.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
 }

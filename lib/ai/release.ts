@@ -166,6 +166,7 @@ export async function releaseHeldReplies(
 
     const isHandover = state.status === "qualified";
     let cc: string[] = [];
+    let introSubject: string | null = null;
     if (isHandover) {
       const plan = planHandover(agent.handover, {
         client: ctx.introduction.client,
@@ -202,6 +203,7 @@ export async function releaseHeldReplies(
         continue;
       }
       cc = plan.cc;
+      introSubject = plan.subject;
     }
 
     const result = await attemptLiveSend({
@@ -215,6 +217,7 @@ export async function releaseHeldReplies(
       lastInboundText: ctx.inboundText,
       isHandover,
       cc,
+      introSubject,
       leadName: ctx.leadName,
       state,
       now,

@@ -67,6 +67,8 @@ export interface LiveSendInput {
   cc?: string[];
   /** The lead's name, paired with the address in the To header as the composer does. */
   leadName?: string | null;
+  /** The handover's "Intro: …" subject (6 Oct); it goes out as a new email on EmailBison. */
+  introSubject?: string | null;
   /** Current persisted state, for the per-thread send cap. */
   state: StoredThreadState | null;
   now: Date;
@@ -132,6 +134,7 @@ export async function attemptLiveSend(input: LiveSendInput): Promise<LiveSendRes
     // list is only ever extra addresses. See `planHandover`.
     cc: input.isHandover ? (input.cc ?? []) : [],
     subject: input.subject,
+    introSubject: input.isHandover ? (input.introSubject ?? null) : null,
     body: input.body,
     isHandover: input.isHandover,
   };
