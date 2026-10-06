@@ -105,6 +105,9 @@ export async function sendMessage({
           ok: false,
           attempts: attempt,
           status: res.status,
+          // LoopMessage's numeric error code (apidocs/error-codes) decides
+          // what happens next: opted out, invalid number, rate limited...
+          code: Number.isFinite(Number(res.body?.code)) ? Number(res.body.code) : null,
           error: res.body?.message ?? res.raw?.slice(0, 300) ?? "send_failed",
           body: res.body,
         };
@@ -114,14 +117,14 @@ export async function sendMessage({
     } catch (err) {
       lastError = err?.name === "TimeoutError" ? "timeout" : String(err?.message ?? err);
       if (attempt === retries + 1) {
-        return { ok: false, attempts: attempt, status: null, error: lastError };
+        return { ok: false, attempts: attempt, status: null, code: null, error: lastError };
       }
     }
 
     await sleep(backoffMs * 2 ** (attempt - 1));
   }
 
-  return { ok: false, attempts: retries + 1, status: null, error: lastError };
+  return { ok: false, attempts: retries + 1, status: null, code: null, error: lastError };
 }
 
 export async function getMessageStatus({

@@ -1,49 +1,14 @@
-// lead.introduction payload -> one LoopMessage per active team member.
+// lead.introduction payload -> who should hear about it, and what it says.
 //
 // The payload contract is produced by lib/webhooks/n8n-introduction.ts in
 // the Masterinbox app: one POST per client_pipeline_entries row, with
 // team[] already filtered to active members that have a phone.
 //
-// That sender swallows every error and never retries (a failed POST only
-// writes a console line), so durability has to live on this side: retries
-// happen in the LoopMessage client, and dedupe happens here so a repeated
-// delivery doesn't double-text an agent.
+// This file owns the plan and all message copy. Whether and when each
+// message actually goes out (consent, pacing, retries, dedupe) is the
+// delivery engine's job — see engine.js.
 
 import { normalizePhone } from "./phone.js";
-import { sendMessage } from "./loopmessage.js";
-
-// Keyed on (pipeline_entry_id, e164). An agent legitimately gets a second
-// text for a *different* lead, so the entry id has to be part of the key.
-export class DedupeStore {
-  constructor({ ttlMs = 6 * 60 * 60 * 1000, maxEntries = 50_000 } = {}) {
-    this.ttlMs = ttlMs;
-    this.maxEntries = maxEntries;
-    this.seen = new Map();
-  }
-
-  // Returns true when this is the first time we've seen the key.
-  claim(key, now = Date.now()) {
-    this.sweep(now);
-    const existing = this.seen.get(key);
-    if (existing !== undefined && existing > now) return false;
-    this.seen.set(key, now + this.ttlMs);
-    return true;
-  }
-
-  sweep(now = Date.now()) {
-    if (this.seen.size === 0) return;
-    for (const [key, expiresAt] of this.seen) {
-      if (expiresAt <= now) this.seen.delete(key);
-    }
-    // Hard bound in case of a flood within one TTL window: drop oldest
-    // insertions first (Map preserves insertion order).
-    while (this.seen.size > this.maxEntries) {
-      const oldest = this.seen.keys().next();
-      if (oldest.done) break;
-      this.seen.delete(oldest.value);
-    }
-  }
-}
 
 // Which clients may be notified, from NOTIFY_CLIENTS.
 //
@@ -70,9 +35,16 @@ export function parseClientList(raw) {
   };
 }
 
-// Mirrors the copy the n8n Twilio node was sending, minus the stray
-// trailing spaces. Fields that are null upstream are omitted rather than
-// rendered as "null" — portal-added leads often have no company.
+// ---------------------------------------------------------------------------
+// Copy
+
+// The lead alert. Mirrors the copy the n8n Twilio node was sending, minus
+// the stray trailing spaces. Fields that are null upstream are omitted
+// rather than rendered as "null" — portal-added leads often have no company.
+//
+// It contains the lead's email, which LoopMessage forbids in a FIRST
+// message — so it is only ever sent to someone who has already messaged the
+// sender (the engine guarantees that).
 export function buildText(teamMemberName, lead = {}) {
   const greetingName = teamMemberName?.trim() || "there";
   const lines = [
@@ -85,10 +57,52 @@ export function buildText(teamMemberName, lead = {}) {
   return lines.join("\n");
 }
 
+// LoopMessage (helpdesk "send-first"): "An initial message must never
+// contain ... marketing, junk, phishing, scam, links, emails, phone numbers,
+// currencies, or attachments." These patterns catch the mechanical ones.
+const UNSAFE_IN_FIRST_MESSAGE = [
+  /@/, // emails
+  /https?:\/\//i, // links
+  /\bwww\./i,
+  /\b[a-z0-9-]+\.(?:com|net|org|io|co|us|ai|app)\b/i, // bare domains
+  /\d(?:[\s().-]*\d){6,}/, // phone-like runs of 7+ digits
+  /[$€£¥₹]/, // currencies
+];
+
+export function isSafeInitialText(text) {
+  const s = String(text ?? "");
+  return !UNSAFE_IN_FIRST_MESSAGE.some((re) => re.test(s));
+}
+
+function firstNameOf(name) {
+  const first = String(name ?? "").trim().split(/\s+/)[0] ?? "";
+  if (!first || /\d/.test(first) || !isSafeInitialText(first)) return "";
+  return first;
+}
+
+// The first message a team member ever gets: no lead details, and it asks
+// for the reply that LoopMessage treats as consent ("the text of the
+// initiating message should contain information that your contact would
+// respond to the message as consent ... or reply that they want to
+// unsubscribe"). Anything unsafe in a name is dropped, never sent.
+export function buildWelcomeText({ name, clientName, brand }) {
+  const first = firstNameOf(name) || "there";
+  const team = String(clientName ?? "").trim();
+  const where = team && isSafeInitialText(team) ? ` at ${team}` : "";
+  return (
+    `Hi ${first}, this is ${brand}. We'll text you here whenever a new lead ` +
+    `is introduced to your team${where}. Reply YES to start getting these, ` +
+    `or STOP to opt out.`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Planning
+
 /**
- * Validate the webhook body without sending anything. Split out from
- * process() so the server can reject a malformed payload synchronously and
- * still hand back a useful reason.
+ * Validate the webhook body and work out the recipients without sending
+ * anything. Split out so a malformed payload is rejected synchronously with
+ * a useful reason.
  */
 export function planNotifications(
   payload,
@@ -152,6 +166,7 @@ export function planNotifications(
 
   const recipients = [];
   const skipped = [];
+  const seen = new Set();
 
   for (const member of team) {
     const name = member?.name ?? null;
@@ -160,6 +175,13 @@ export function planNotifications(
       skipped.push({ name, mobile: member?.mobile ?? null, reason: normalized.reason });
       continue;
     }
+    // Two team rows can share a phone (a shared desk line, a duplicate
+    // row). One person, one text.
+    if (seen.has(normalized.e164)) {
+      skipped.push({ name, mobile: member?.mobile ?? null, reason: "duplicate_phone_on_team" });
+      continue;
+    }
+    seen.add(normalized.e164);
     recipients.push({
       name,
       mobile: member?.mobile ?? null,
@@ -172,22 +194,17 @@ export function planNotifications(
 }
 
 /**
- * Send the planned messages. Team lists are small (one client's agents), so
- * the fan-out runs in parallel.
+ * Plan the introduction and hand it to the delivery engine. `dryRun`
+ * previews what the engine would do without changing anything.
  */
 export async function processIntroduction(payload, deps) {
   const {
-    apiKey,
-    baseUrl,
-    sender,
-    channel,
+    engine,
     defaultCountryCode = "1",
     clientFilter = null,
     testRecipientOverride = null,
-    dedupe,
     logger = console,
     dryRun = false,
-    fetchImpl = fetch,
   } = deps;
 
   const plan = planNotifications(payload, {
@@ -234,86 +251,15 @@ export async function processIntroduction(payload, deps) {
     );
   }
 
-  const passthrough = JSON.stringify({
-    pipeline_entry_id: plan.entryId,
-    client_id: plan.clientId,
-    source: plan.source,
-  }).slice(0, 1000);
-
-  const results = await Promise.all(
-    plan.recipients.map(async (recipient) => {
-      // Before the dedupe claim: a dry run must not reserve the key, or
-      // the real delivery of the same lead would be suppressed for the
-      // whole TTL.
-      if (dryRun) {
-        return { ...recipient, status: "dry_run" };
-      }
-
-      const key = `${plan.entryId}:${recipient.contact}`;
-      if (dedupe && !dedupe.claim(key)) {
-        logger.log(
-          JSON.stringify({
-            level: "info",
-            msg: "duplicate_suppressed",
-            entry_id: plan.entryId,
-            contact: recipient.contact,
-            team_member: recipient.name,
-          }),
-        );
-        return { ...recipient, status: "duplicate_suppressed" };
-      }
-
-      const sent = await sendMessage({
-        baseUrl,
-        apiKey,
-        contact: recipient.contact,
-        text: recipient.text,
-        sender,
-        channel,
-        passthrough,
-        fetchImpl,
-      });
-
-      if (!sent.ok) {
-        // Release the dedupe claim so a genuine retry can get through —
-        // holding it would turn a transient failure into a silent drop.
-        if (dedupe) dedupe.seen.delete(key);
-        logger.error(
-          JSON.stringify({
-            level: "error",
-            msg: "send_failed",
-            entry_id: plan.entryId,
-            contact: recipient.contact,
-            team_member: recipient.name,
-            attempts: sent.attempts,
-            status: sent.status,
-            error: sent.error,
-          }),
-        );
-        return { ...recipient, status: "failed", error: sent.error, httpStatus: sent.status };
-      }
-
-      logger.log(
-        JSON.stringify({
-          level: "info",
-          msg: "queued",
-          entry_id: plan.entryId,
-          contact: recipient.contact,
-          team_member: recipient.name,
-          message_id: sent.messageId,
-          attempts: sent.attempts,
-        }),
-      );
-      return { ...recipient, status: "queued", messageId: sent.messageId };
-    }),
-  );
+  const results = await engine.handleIntroduction(plan, { dryRun });
 
   return {
     ok: true,
     entryId: plan.entryId,
     client: plan.clientName,
     testOverride: Boolean(plan.testOverride),
+    dryRun,
     skipped: plan.skipped,
-    results: results.map(({ text, ...rest }) => rest),
+    results,
   };
 }

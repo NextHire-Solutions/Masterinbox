@@ -43,6 +43,14 @@ export function normalizePhone(raw, opts = {}) {
     if (digits.length < 8 || digits.length > 15) {
       return { ok: false, reason: `international_length_${digits.length}` };
     }
+    // +1 is the only country code starting with 1, so this is NANP: hold it
+    // to the same shape as a bare 10-digit number. Placeholders like the
+    // Demo Portal's +1 555 100 1001 fail here instead of being texted — and
+    // with Init conversations every wasted first message counts against
+    // the daily cap.
+    if (digits.startsWith("1") && (digits.length !== 11 || !NANP_10.test(digits.slice(1)))) {
+      return { ok: false, reason: "not_a_valid_nanp_number" };
+    }
     return { ok: true, e164: `+${digits}` };
   }
 
