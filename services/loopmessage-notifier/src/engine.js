@@ -36,7 +36,7 @@
 
 import { normalizePhone } from "./phone.js";
 import { classifyReply } from "./inbound.js";
-import { buildWelcomeText, isSafeInitialText } from "./notify.js";
+import { buildText, buildWelcomeText, isSafeInitialText, leadFromLegacyAlertText } from "./notify.js";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -222,7 +222,14 @@ export class Engine {
     }
 
     const c = this.ensureContact(r.contact, { name: r.name, clientName: plan.clientName }, now);
-    const alert = { entryId: plan.entryId, text: r.text, passthrough, at: now };
+    const alert = {
+      entryId: plan.entryId,
+      text: r.text,
+      lead: r.lead ?? null,
+      name: r.name ?? null,
+      passthrough,
+      at: now,
+    };
 
     if (TERMINAL.has(c.status)) {
       this.log("info", "alert_skipped", {
@@ -267,9 +274,18 @@ export class Engine {
     return { ...base, status: wasNew ? "held_welcome_queued" : "held_awaiting_reply" };
   }
 
+  // The alert's text in the CURRENT wording, built at send time so a copy
+  // change also applies to alerts that were held or queued before it.
+  renderAlert(c, alert) {
+    const name = alert.name ?? c.name ?? null;
+    if (alert.lead) return buildText(name, alert.lead);
+    const legacy = leadFromLegacyAlertText(alert.text);
+    return legacy ? buildText(name, legacy) : alert.text;
+  }
+
   // Send one alert now. Only called for active contacts.
   async deliver(c, alert, now) {
-    const res = await this.send({ contact: c.contact, text: alert.text, passthrough: alert.passthrough });
+    const res = await this.send({ contact: c.contact, text: this.renderAlert(c, alert), passthrough: alert.passthrough });
     if (res.ok) {
       c.lastOutboundAt = now;
       this.log("info", "alert_sent", {
@@ -498,7 +514,7 @@ export class Engine {
     if (!contact) return;
     const c = this.state.contacts[contact];
 
-    const text = buildWelcomeText({ name: c.name, clientName: c.clientName, brand: this.config.brand });
+    const text = buildWelcomeText({ name: c.name, brand: this.config.brand });
     const res = await this.send({ contact, text, passthrough: JSON.stringify({ kind: "welcome" }) });
 
     // Remove by number, not position, and don't demote someone who replied
@@ -591,7 +607,7 @@ export class Engine {
     }
 
     const cold = !this.isRecent(c, now);
-    const res = await this.send({ contact: c.contact, text: item.text, passthrough: item.passthrough });
+    const res = await this.send({ contact: c.contact, text: this.renderAlert(c, item), passthrough: item.passthrough });
     if (res.ok) {
       if (cold) p.lastColdAt = now;
       c.lastOutboundAt = now;
@@ -656,6 +672,8 @@ export class Engine {
     c.held.push({
       entryId: alert.entryId,
       text: alert.text,
+      lead: alert.lead ?? null,
+      name: alert.name ?? null,
       passthrough: alert.passthrough,
       at: alert.at ?? now,
     });

@@ -38,23 +38,40 @@ export function parseClientList(raw) {
 // ---------------------------------------------------------------------------
 // Copy
 
-// The lead alert. Mirrors the copy the n8n Twilio node was sending, minus
-// the stray trailing spaces. Fields that are null upstream are omitted
-// rather than rendered as "null" — portal-added leads often have no company.
+// The lead's phone as the client wants to read it: US numbers as
+// "(665) 234-1234"; anything else exactly as entered.
+export function formatLeadPhone(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  const n = normalizePhone(s);
+  if (n.ok && n.e164.startsWith("+1") && n.e164.length === 12) {
+    const d = n.e164.slice(2);
+    return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  }
+  return s;
+}
+
+// The lead alert, in the wording the client approved (Oct 2026). The lead
+// is an agent, the company is their brokerage, and the email is left out.
+// Fields that are empty upstream are omitted rather than rendered as
+// "null"; portal-added leads often have no phone or company.
 //
-// It contains the lead's email, which LoopMessage forbids in a FIRST
-// message — so it is only ever sent to someone who has already messaged the
+// It contains the lead's phone number, which LoopMessage forbids in a FIRST
+// message, so it is only ever sent to someone who has already messaged the
 // sender (the engine guarantees that).
 export function buildText(teamMemberName, lead = {}) {
-  const greetingName = teamMemberName?.trim() || "there";
-  const lines = [
-    `Hi ${greetingName}, we received a new lead in the Introduction stage.`,
+  const first = firstNameOf(teamMemberName) || "there";
+  const details = [];
+  if (lead.name) details.push(`Agent: ${lead.name}`);
+  const phone = formatLeadPhone(lead.phone);
+  if (phone) details.push(`Phone: ${phone}`);
+  if (lead.company) details.push(`Brokerage: ${lead.company}`);
+  return [
+    `Hi ${first}, you have a new agent in the Introduction stage.`,
+    ...(details.length > 0 ? ["", ...details] : []),
     "",
-  ];
-  if (lead.name) lines.push(`Lead name: ${lead.name}`);
-  if (lead.email) lines.push(`Email: ${lead.email}`);
-  if (lead.company) lines.push(`Company: ${lead.company}`);
-  return lines.join("\n");
+    "To opt out, reply STOP.",
+  ].join("\n");
 }
 
 // LoopMessage (helpdesk "send-first"): "An initial message must never
@@ -80,24 +97,44 @@ function firstNameOf(name) {
   return first;
 }
 
-// The first message a team member ever gets: no lead details, and it asks
-// for the reply that LoopMessage treats as consent ("the text of the
-// initiating message should contain information that your contact would
-// respond to the message as consent ... or reply that they want to
-// unsubscribe"). Anything unsafe in a name is dropped, never sent.
-export function buildWelcomeText({ name, clientName, brand }) {
+// Alerts held before the Oct 2026 copy change were saved as finished text
+// in the old wording ("we received a new lead ... Lead name / Email /
+// Company"). Recover the lead from that text so they go out in the current
+// wording; the old text never carried the lead's phone.
+export function leadFromLegacyAlertText(text) {
+  const s = String(text ?? "");
+  if (!s.includes("we received a new lead in the Introduction stage.")) return null;
+  const field = (label) => s.match(new RegExp(`^${label}: (.+)$`, "m"))?.[1]?.trim() ?? null;
+  return { name: field("Lead name"), phone: null, company: field("Company") };
+}
+
+// The first message a team member ever gets, in the client's wording (Oct
+// 2026): no lead details, no client name, and it asks for the reply that
+// LoopMessage treats as consent ("the text of the initiating message should
+// contain information that your contact would respond to the message as
+// consent ... or reply that they want to unsubscribe"). Anything unsafe in
+// a name is dropped, never sent.
+export function buildWelcomeText({ name, brand }) {
   const first = firstNameOf(name) || "there";
-  const team = String(clientName ?? "").trim();
-  const where = team && isSafeInitialText(team) ? ` at ${team}` : "";
   return (
-    `Hi ${first}, this is ${brand}. We'll text you here whenever a new lead ` +
-    `is introduced to your team${where}. Reply YES to start getting these, ` +
+    `Hi ${first}, this is ${brand}. We'll text you here whenever a new agent ` +
+    `is introduced to your team. Reply YES to start getting these, ` +
     `or STOP to opt out.`
   );
 }
 
 // ---------------------------------------------------------------------------
 // Planning
+
+// Just the fields the alert shows. Held and queued alerts keep these (not
+// the finished text) so a copy change applies to them too.
+function alertLead(lead) {
+  return {
+    name: lead?.name ?? null,
+    phone: lead?.phone ?? null,
+    company: lead?.company ?? null,
+  };
+}
 
 /**
  * Validate the webhook body and work out the recipients without sending
@@ -158,6 +195,7 @@ export function planNotifications(
           mobile: testRecipientOverride,
           contact: normalized.e164,
           text: buildText(name, lead),
+          lead: alertLead(lead),
         },
       ],
       skipped: [],
@@ -187,6 +225,7 @@ export function planNotifications(
       mobile: member?.mobile ?? null,
       contact: normalized.e164,
       text: buildText(name, lead),
+      lead: alertLead(lead),
     });
   }
 

@@ -135,7 +135,7 @@ function intro(entryId, team, { client = { id: "c-demo", name: "Demo Portal" } }
   });
 }
 
-const alertsIn = (sent) => sent.filter((m) => /Lead name:/.test(m.text));
+const alertsIn = (sent) => sent.filter((m) => /you have a new agent/.test(m.text));
 const welcomesIn = (sent) => sent.filter((m) => /Reply YES/.test(m.text));
 const fail = (code, status = 400) => ({ ok: false, code, status, error: `code_${code}` });
 
@@ -241,42 +241,72 @@ await test("empty team is valid but plans nothing", () => {
 // ---------------------------------------------------------------------------
 console.log("\ncopy");
 
-await test("alert text matches the copy the Twilio node sent", () => {
+await test("alert text is exactly the client's approved example", () => {
+  // Eddy's wording, Oct 2026: agent, phone, brokerage; no email.
   assert.equal(
-    buildText("Lara Chopoorian", PINNED.lead),
-    "Hi Lara Chopoorian, we received a new lead in the Introduction stage.\n\n" +
-      "Lead name: Radhamilca Tucker\n" +
-      "Email: rtucker@christiesrealestategroup.com\n" +
-      "Company: Christies International Real Estate New York Llc",
+    buildText("Eddy", {
+      name: "Laura Wilson",
+      email: "laura@hotmail.com",
+      phone: "6652341234",
+      company: "Legacy Realty Group",
+    }),
+    "Hi Eddy, you have a new agent in the Introduction stage.\n\n" +
+      "Agent: Laura Wilson\n" +
+      "Phone: (665) 234-1234\n" +
+      "Brokerage: Legacy Realty Group\n\n" +
+      "To opt out, reply STOP.",
   );
 });
 
-await test("null lead fields are omitted, not rendered as 'null'", () => {
-  const text = buildText("Sam", { name: "Jo", email: null, company: null });
-  assert.equal(text, "Hi Sam, we received a new lead in the Introduction stage.\n\nLead name: Jo");
-});
-
-await test("the alert itself is NOT safe as a first message (it has an email)", () => {
-  // Why alerts only ever go to people who've already messaged the sender.
-  assert.equal(isSafeInitialText(buildText("Lara", PINNED.lead)), false);
-});
-
-await test("the welcome is safe as a first message and asks for a reply", () => {
-  const text = buildWelcomeText({ name: "Lara Chopoorian", clientName: "Douglas Elliman NYC", brand: "BrokerStaffer" });
+await test("the alert greets by first name and never includes the email", () => {
+  const text = buildText("Lara Chopoorian", PINNED.lead);
   assert.equal(
     text,
-    "Hi Lara, this is BrokerStaffer. We'll text you here whenever a new lead is introduced " +
-      "to your team at Douglas Elliman NYC. Reply YES to start getting these, or STOP to opt out.",
+    "Hi Lara, you have a new agent in the Introduction stage.\n\n" +
+      "Agent: Radhamilca Tucker\n" +
+      "Brokerage: Christies International Real Estate New York Llc\n\n" +
+      "To opt out, reply STOP.",
+  );
+  assert.ok(!text.includes("@"));
+});
+
+await test("empty lead fields are omitted, not rendered as 'null'", () => {
+  assert.equal(
+    buildText("Sam", { name: "Jo", phone: null, company: null }),
+    "Hi Sam, you have a new agent in the Introduction stage.\n\nAgent: Jo\n\nTo opt out, reply STOP.",
+  );
+  assert.equal(
+    buildText(null, {}),
+    "Hi there, you have a new agent in the Introduction stage.\n\nTo opt out, reply STOP.",
+  );
+});
+
+await test("lead phones: US formatted as (xxx) xxx-xxxx, others kept as entered", () => {
+  assert.match(buildText("A", { phone: "+1 665-234-1234" }), /Phone: \(665\) 234-1234/);
+  assert.match(buildText("A", { phone: "(665)2341234" }), /Phone: \(665\) 234-1234/);
+  assert.match(buildText("A", { phone: "+44 20 7946 0958" }), /Phone: \+44 20 7946 0958/);
+});
+
+await test("the alert itself is NOT safe as a first message (it has the lead's phone)", () => {
+  // Why alerts only ever go to people who've already messaged the sender.
+  assert.equal(isSafeInitialText(buildText("Lara", { name: "Laura", phone: "6652341234" })), false);
+});
+
+await test("the welcome is exactly the client's approved wording and safe as a first message", () => {
+  const text = buildWelcomeText({ name: "Eddy", brand: "BrokerStaffer" });
+  assert.equal(
+    text,
+    "Hi Eddy, this is BrokerStaffer. We'll text you here whenever a new agent is introduced " +
+      "to your team. Reply YES to start getting these, or STOP to opt out.",
   );
   assert.equal(isSafeInitialText(text), true);
 });
 
-await test("unsafe client names and odd first names are dropped from the welcome", () => {
-  const text = buildWelcomeText({ name: "agent@x.com", clientName: "Acme (212) 555-0100", brand: "BrokerStaffer" });
+await test("odd first names are dropped from the welcome", () => {
+  const text = buildWelcomeText({ name: "agent@x.com", brand: "BrokerStaffer" });
   assert.ok(text.startsWith("Hi there,"));
-  assert.ok(text.includes("introduced to your team."));
   assert.equal(isSafeInitialText(text), true);
-  assert.equal(isSafeInitialText(buildWelcomeText({ name: null, clientName: "www.acme.com", brand: "X" })), true);
+  assert.ok(buildWelcomeText({ name: "Lara Chopoorian", brand: "B" }).startsWith("Hi Lara,"));
 });
 
 await test("the safety check catches what LoopMessage forbids", () => {
@@ -344,7 +374,7 @@ await test("override hands the engine exactly one recipient: the override number
 await test("override greets the team member who owns that number", () => {
   const plan = planNotifications(DEMO, { testRecipientOverride: "+17184150537" });
   assert.equal(plan.recipients[0].name, "Demo Tester");
-  assert.ok(plan.recipients[0].text.startsWith("Hi Demo Tester,"));
+  assert.ok(plan.recipients[0].text.startsWith("Hi Demo,"));
 });
 
 await test("override falls back to the first named member, then 'there'", () => {
@@ -498,7 +528,7 @@ await test("a reply activates them and releases the held alert straight away", a
   assert.equal(out.status, "active");
   await h.engine.idle();
   assert.equal(alertsIn(h.sent).length, 1);
-  assert.match(alertsIn(h.sent)[0].text, /rtucker@christiesrealestategroup\.com/);
+  assert.match(alertsIn(h.sent)[0].text, /Agent: Radhamilca Tucker/);
 });
 
 await test("any reply other than STOP counts as consent", async () => {
@@ -696,6 +726,44 @@ await test("a held alert older than a day is dropped, not sent late", async () =
   assert.equal(h.engine.state.contacts[A_E164].status, "active");
 });
 
+await test("an alert held under the old wording goes out in the new wording", async () => {
+  // State saved before the Oct 2026 copy change held finished text only.
+  const legacy = {
+    contacts: {
+      [A_E164]: {
+        contact: A_E164, status: "welcomed", name: "Eddy", clientName: "Demo Portal",
+        createdAt: T0, welcomedAt: T0,
+        held: [{
+          entryId: "old-1",
+          text: "Hi Eddy, we received a new lead in the Introduction stage.\n\n" +
+            "Lead name: Laura Wilson\nEmail: laura@hotmail.com\nCompany: Legacy Realty Group",
+          passthrough: "{}",
+          at: T0,
+        }],
+      },
+    },
+    welcomeQueue: [], outbox: [], dedupe: {}, pacing: {},
+  };
+  const h = harness({ store: new MemoryStore(legacy) });
+  await h.engine.handleInbound({ contact: A_E164, text: "yes" });
+  await h.engine.idle();
+  assert.equal(
+    h.sent[0].text,
+    "Hi Eddy, you have a new agent in the Introduction stage.\n\n" +
+      "Agent: Laura Wilson\nBrokerage: Legacy Realty Group\n\nTo opt out, reply STOP.",
+  );
+});
+
+await test("a held alert is worded at send time, not when it was held", async () => {
+  const h = harness();
+  await h.engine.handleIntroduction(intro("e1", [A]));
+  await h.engine.tick();
+  h.engine.state.contacts[A_E164].held[0].text = "STALE WORDING";
+  await h.engine.handleInbound({ contact: A_E164, text: "yes" });
+  await h.engine.idle();
+  assert.equal(alertsIn(h.sent)[0].text, buildText("Avery Real", PINNED.lead));
+});
+
 await test("at most 5 alerts are held per person", async () => {
   const h = harness();
   await h.engine.handleIntroduction(intro("e0", [A]));
@@ -889,7 +957,7 @@ await test("an alert that hits an outage is retried from the outbox", async () =
   h.advance(5 * MIN);
   await h.engine.tick();
   assert.equal(h.sent.length, 2);
-  assert.match(h.sent[1].text, /Lead name:/);
+  assert.match(h.sent[1].text, /Agent: Radhamilca Tucker/);
 });
 
 await test("delivery webhooks update the welcome: delivered, or failed as invalid", async () => {
