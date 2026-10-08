@@ -1,5 +1,7 @@
-import { createEmailBisonClient } from "@/lib/emailbison/client";
+import { createEmailBisonClient, EmailBisonError } from "@/lib/emailbison/client";
 import { createInstantlyClient } from "@/lib/instantly/client";
+import { alreadyBlacklisted } from "@/lib/portals/stop-person-plan";
+import { selectBrokerStafferWorkspace } from "@/lib/portals/stop-person";
 
 // Pushes an email to Instantly and EmailBison blocklists. Used when a
 // client adds an entry to their DNC list or their own-agent roster —
@@ -9,11 +11,17 @@ import { createInstantlyClient } from "@/lib/instantly/client";
 // markThreadLeadDoNotContact (which has full channel/team context). For
 // client-level entries we don't know the channel, so we push to:
 //   - Instantly  → POST /block-lists-entries (global per workspace)
-//   - EmailBison → POST /api/blacklisted-emails (without switchWorkspace —
-//                  best-effort; team scoping happens server-side)
+//   - EmailBison → POST /api/blacklisted-emails, in BrokerStaffer's
+//                  workspace (the blacklist is scoped to the API user's
+//                  active workspace, and that user can reach three).
 //
 // Both attempts are best-effort and swallow their own errors. Per-provider
-// success is reported back so the caller can mark the DB row.
+// success is reported back so the caller can mark the DB row. EmailBison's
+// 422 "already on the list" is reported as pushed — it is.
+//
+// The blacklist stops the ADDRESS. Callers then run stopEntries
+// (lib/portals/stop-person.ts) after responding, which also stops the
+// person's existing conversations and their other addresses.
 
 export interface BlocklistResult {
   pushedInstantly: boolean;
@@ -41,10 +49,13 @@ export async function enforceBlocklist(email: string): Promise<BlocklistResult> 
 
   try {
     const eb = createEmailBisonClient();
+    // A failed switch leaves the active workspace as before (it is BrokerStaffer's today).
+    await selectBrokerStafferWorkspace(eb).catch(() => undefined);
     await eb.blacklistEmail(addr);
     pushedEmailBison = true;
   } catch (err) {
-    errors.push(`emailbison: ${err instanceof Error ? err.message : String(err)}`);
+    if (err instanceof EmailBisonError && alreadyBlacklisted(err.status, err.body)) pushedEmailBison = true;
+    else errors.push(`emailbison: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   return {
@@ -96,10 +107,13 @@ export async function enforceDomainBlocklist(domain: string): Promise<BlocklistR
 
   try {
     const eb = createEmailBisonClient();
+    // A failed switch leaves the active workspace as before (it is BrokerStaffer's today).
+    await selectBrokerStafferWorkspace(eb).catch(() => undefined);
     await eb.blacklistDomain(d);
     pushedEmailBison = true;
   } catch (err) {
-    errors.push(`emailbison: ${err instanceof Error ? err.message : String(err)}`);
+    if (err instanceof EmailBisonError && alreadyBlacklisted(err.status, err.body)) pushedEmailBison = true;
+    else errors.push(`emailbison: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   return {

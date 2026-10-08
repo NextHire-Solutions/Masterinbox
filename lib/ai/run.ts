@@ -1,7 +1,8 @@
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import { loadAiConfigWithKey } from "@/lib/ai/config";
 import { classifyReply, DEFAULT_SYSTEM_PROMPT } from "@/lib/ai/label";
-import { isHostileLabel, markThreadLeadDoNotContact } from "@/lib/inbox/dnc";
+import { isHostileLabel, markThreadLeadDoNotContact, stopThreadPerson } from "@/lib/inbox/dnc";
+import { isStopContactLabel } from "@/lib/portals/stop-person-plan";
 import {
   isInterestedLabel,
   isNotInterestedLabel,
@@ -158,6 +159,12 @@ export async function labelInboundMessage(input: LabelInboundInput): Promise<Lab
   // platform's blocklist so the sequencer stops emailing them.
   if (isHostileLabel(labelRow.name)) {
     await markThreadLeadDoNotContact(input.threadId);
+  }
+  // Hostile, Unsubscribe, Do Not Contact, Add to Blocklist → stop the person
+  // everywhere (both platforms, every conversation). Live replies only — the
+  // workspace backfill below stays Hostile-only. Not awaited; never throws.
+  if (isStopContactLabel(labelRow.name)) {
+    void stopThreadPerson(input.threadId);
   }
 
   // Interested / Not Interested → mirror the verdict to EmailBison so the

@@ -410,6 +410,13 @@ export function createEmailBisonClient(opts: ClientOpts = {}) {
     blacklistDomain: (domain: string) =>
       request<{ data?: unknown }>("POST", "/blacklisted-domains", { domain }),
 
+    // PATCH /api/replies/{reply_id}/unsubscribe — "unsubscribes the contact
+    // associated with a specific reply from scheduled emails" in the active
+    // team. Used with the blacklist when someone must not be contacted: the
+    // blacklist stops the address, this stops the lead's scheduled emails.
+    unsubscribeReply: (replyId: number | string) =>
+      request<{ data?: unknown }>("PATCH", `/replies/${replyId}/unsubscribe`),
+
     // Leads
     getLead: (leadId: number) => request<{ data: unknown }>("GET", `/leads/${leadId}`),
     // EmailBison returns scheduled emails with a NESTED sender_email object

@@ -7,6 +7,7 @@ import {
   enforceDomainBlocklist,
   normalizeDomain,
 } from "@/lib/portals/enforce-blocklist";
+import { stopEntries } from "@/lib/portals/stop-person";
 import { notifyPortalDncBulkAdd } from "@/lib/webhooks/slack-portal";
 
 // POST /api/portal/[token]/dnc/csv — bulk-import parsed DNC rows.
@@ -146,6 +147,7 @@ export async function POST(
     const targets = (inserted ?? []) as Array<{
       id: string;
       kind: "agent" | "company";
+      name: string | null;
       email: string | null;
       domain: string | null;
     }>;
@@ -171,6 +173,9 @@ export async function POST(
         }),
       );
     }
+    // Then stop the people's existing conversations and other addresses —
+    // one batched pass for the whole file. Never throws.
+    await stopEntries(pushable.filter((t) => t.kind === "agent").map((t) => ({ email: t.email, name: t.name })));
   })();
   void pushPromise;
 

@@ -7,6 +7,7 @@ import {
   enforceDomainBlocklist,
   normalizeDomain,
 } from "@/lib/portals/enforce-blocklist";
+import { stopEntries } from "@/lib/portals/stop-person";
 import { notifyPortalDncChange } from "@/lib/webhooks/slack-portal";
 
 // POST /api/portal/[token]/dnc — add a DNC entry.
@@ -96,6 +97,11 @@ export async function POST(
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 400 });
   }
+
+  // Beyond the blacklist: stop the person's existing conversations and
+  // their other addresses. After the response, so the Add click is no
+  // slower. (A company's domain blacklist already covers everyone there.)
+  if (kind === "agent" && email) after(() => stopEntries([{ email, name }]));
 
   // Slack: announce the new DNC entry. Pre-fetched fields (we
   // already have them from the insert payload), so no extra DB

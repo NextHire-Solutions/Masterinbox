@@ -7,6 +7,7 @@ import {
   enforceDomainBlocklist,
   normalizeDomain,
 } from "@/lib/portals/enforce-blocklist";
+import { stopEntries } from "@/lib/portals/stop-person";
 import { notifyPortalDncChange } from "@/lib/webhooks/slack-portal";
 
 // PATCH / DELETE /api/portal/[token]/dnc/[id]
@@ -58,7 +59,7 @@ export async function PATCH(
   const admin = createAdminSupabase();
   const { data: current, error: readErr } = await admin
     .from("client_dnc_entries")
-    .select("email, kind, domain")
+    .select("email, kind, domain, name")
     .eq("id", id)
     .eq("client_id", client.id)
     .maybeSingle();
@@ -104,6 +105,8 @@ export async function PATCH(
       update.pushed_to_instantly = r.pushedInstantly;
       update.pushed_to_emailbison = r.pushedEmailBison;
       update.push_error = r.error;
+      const name = (parsed.data.name ?? current.name ?? null) as string | null;
+      after(() => stopEntries([{ email: newEmail, name }]));
     }
   }
 
