@@ -4,6 +4,7 @@ import { resolvePortalClient } from "@/lib/portals/token";
 import { loadTeamMembers } from "@/lib/portals/portal-data";
 import { clientHasFeature } from "@/lib/portals/feature-flags";
 import { getClientPlan } from "@/lib/portals/client-plan";
+import { TEAM_SMS_FLAG, loadTeamSmsSettings } from "@/lib/portals/team-sms";
 import { TeamList } from "@/components/portals/team-list";
 
 export const dynamic = "force-dynamic";
@@ -37,5 +38,10 @@ export default async function TeamPage(props: {
   if (showPlan && !plan && client.id === "00ef116c-646d-43b4-a323-680548ea7126") {
     plan = "production";
   }
-  return <TeamList token={token} members={members} plan={plan} />;
+  // Per-member SMS switches, only with the team_sms_notifications flag.
+  // null (flag off, or the read failed) means no SMS column at all.
+  const sms = clientHasFeature(client, TEAM_SMS_FLAG)
+    ? await loadTeamSmsSettings(client.id)
+    : null;
+  return <TeamList token={token} members={members} plan={plan} sms={sms} />;
 }

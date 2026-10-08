@@ -67,10 +67,16 @@ const PLAN_STYLE: Record<string, string> = {
   partner: "bg-[#f5efff] text-[#7c3aed] ring-[#ddd0f7]",
 };
 
+// Table grid. The SMS column only exists for clients with the
+// team_sms_notifications flag; everyone else keeps the original grid.
+const TEAM_GRID = "grid min-w-[680px] grid-cols-[36px_1.4fr_1.1fr_1.6fr_72px_84px]";
+const TEAM_GRID_SMS = "grid min-w-[760px] grid-cols-[36px_1.4fr_1.1fr_1.6fr_72px_72px_84px]";
+
 export function TeamList({
   token,
   members: initial,
   plan = null,
+  sms = null,
 }: {
   token: string;
   members: TeamMember[];
@@ -78,6 +84,9 @@ export function TeamList({
   // null when the show_client_plan flag is off or the feed is unavailable →
   // no chip renders, so the page is unchanged for clients without the flag.
   plan?: string | null;
+  // Member id → SMS alerts on/off. null when the team_sms_notifications flag
+  // is off (or the read failed) → no SMS column, page unchanged.
+  sms?: Record<string, boolean> | null;
 }) {
   const router = useRouter();
   const mounted = useMounted();
@@ -105,7 +114,10 @@ export function TeamList({
     return filtered.slice(start, start + PORTAL_PAGE_SIZE);
   }, [filtered, page]);
 
-  async function patch(id: string, body: Partial<TeamMember>) {
+  async function patch(
+    id: string,
+    body: Partial<TeamMember> & { receives_sms?: boolean },
+  ) {
     const res = await fetch(`/api/portal/${token}/team/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -123,6 +135,32 @@ export function TeamList({
   function setActive(id: string, active: boolean) {
     setMembers((cur) => cur.map((m) => (m.id === id ? { ...m, active } : m)));
     void patch(id, { active });
+  }
+
+  // SMS switches (team_sms_notifications flag only). Local overrides on top
+  // of the server values, so a toggle shows instantly; a failed save drops
+  // the override and the switch falls back to what the server has.
+  const [smsOverrides, setSmsOverrides] = useState<Record<string, boolean>>({});
+  const smsOn = (id: string) => smsOverrides[id] ?? sms?.[id] ?? true;
+  // Texts need an active member with a phone; the switch is disabled otherwise.
+  const canText = (m: TeamMember) => m.active && Boolean(m.phone?.trim());
+  function smsHint(m: TeamMember) {
+    if (!m.phone?.trim()) return "Add a mobile number to send text alerts";
+    if (!m.active) return "Inactive members don't get text alerts";
+    return smsOn(m.id)
+      ? "Gets a text for every new introduction"
+      : "Doesn't get text alerts";
+  }
+  async function setSms(id: string, receives: boolean) {
+    setSmsOverrides((cur) => ({ ...cur, [id]: receives }));
+    const ok = await patch(id, { receives_sms: receives });
+    if (!ok) {
+      setSmsOverrides((cur) => {
+        const next = { ...cur };
+        delete next[id];
+        return next;
+      });
+    }
   }
   async function remove(id: string, name: string) {
     if (!confirm(`Remove ${name}?`)) return;
@@ -273,6 +311,13 @@ export function TeamList({
             email thread and introduces the agent directly to the active
             recipients below.
           </p>
+          {sms ? (
+            <p className="mt-1.5 text-[13px] leading-relaxed text-[#3730a3]">
+              Members with <span className="font-semibold">SMS</span> switched
+              on also get a text message for each new introduction. The first
+              time, they&apos;re asked to reply YES.
+            </p>
+          ) : null}
         </div>
       </div>
 
@@ -394,7 +439,12 @@ export function TeamList({
             mounted ? "opacity-100" : "opacity-0",
           )}
         >
-          <div className="grid min-w-[680px] grid-cols-[36px_1.4fr_1.1fr_1.6fr_72px_84px] items-center gap-3 border-b border-[#ebecf0] bg-[#fafbfc] px-4 py-2.5 text-[10.5px] font-semibold uppercase tracking-wide text-[#9aa0ab]">
+          <div
+            className={cn(
+              sms ? TEAM_GRID_SMS : TEAM_GRID,
+              "items-center gap-3 border-b border-[#ebecf0] bg-[#fafbfc] px-4 py-2.5 text-[10.5px] font-semibold uppercase tracking-wide text-[#9aa0ab]",
+            )}
+          >
             <div className="flex items-center justify-center">
               <input
                 type="checkbox"
@@ -410,6 +460,7 @@ export function TeamList({
             <div>Title</div>
             <div>Email / Phone</div>
             <div className="text-center">Active</div>
+            {sms ? <div className="text-center">SMS</div> : null}
             <div></div>
           </div>
           {filtered.length === 0 ? (
@@ -422,7 +473,8 @@ export function TeamList({
               <div
                 key={m.id}
                 className={cn(
-                  "grid min-w-[680px] grid-cols-[36px_1.4fr_1.1fr_1.6fr_72px_84px] items-center gap-3 px-4 py-3 transition-colors hover:bg-[#fafbfc]",
+                  sms ? TEAM_GRID_SMS : TEAM_GRID,
+                  "items-center gap-3 px-4 py-3 transition-colors hover:bg-[#fafbfc]",
                   !m.active && "opacity-60",
                   selected.has(m.id) && "bg-[#eaf2fd]/40 hover:bg-[#eaf2fd]/60",
                 )}
@@ -470,6 +522,16 @@ export function TeamList({
                     aria-label="Active"
                   />
                 </div>
+                {sms ? (
+                  <div className="flex justify-center" title={smsHint(m)}>
+                    <Switch
+                      checked={canText(m) && smsOn(m.id)}
+                      disabled={!canText(m)}
+                      onCheckedChange={(v) => void setSms(m.id, Boolean(v))}
+                      aria-label={`SMS alerts for ${m.name}`}
+                    />
+                  </div>
+                ) : null}
                 <div className="flex justify-end gap-1">
                   <button
                     type="button"

@@ -2,6 +2,8 @@ import { NextResponse, after } from "next/server";
 import { z } from "zod";
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import { resolvePortalClient } from "@/lib/portals/token";
+import { clientHasFeature } from "@/lib/portals/feature-flags";
+import { TEAM_SMS_FLAG } from "@/lib/portals/team-sms";
 import { notifyPortalTeamChange } from "@/lib/webhooks/slack-portal";
 
 // PATCH / DELETE /api/portal/[token]/team/[id]
@@ -15,6 +17,9 @@ const patchSchema = z.object({
   email: z.string().trim().email().max(160).optional(),
   phone: z.string().trim().max(40).nullable().optional(),
   active: z.boolean().optional(),
+  // Team-page SMS switch. Only accepted for clients with the
+  // team_sms_notifications flag (404 otherwise); see lib/portals/team-sms.ts.
+  receives_sms: z.boolean().optional(),
 });
 
 export async function PATCH(
@@ -35,6 +40,12 @@ export async function PATCH(
   }
   if (Object.keys(parsed.data).length === 0) {
     return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
+  }
+  if (
+    parsed.data.receives_sms !== undefined &&
+    !clientHasFeature(client, TEAM_SMS_FLAG)
+  ) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
   const admin = createAdminSupabase();
