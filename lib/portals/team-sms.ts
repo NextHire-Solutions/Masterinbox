@@ -1,12 +1,20 @@
-// Per-member SMS alerts for Introductions: "who on the team gets a text".
+// SMS alerts for Introductions: which clients get them, and who on each
+// client's team.
 //
-// Gated per client by the `team_sms_notifications` feature flag (Demo
-// Portal only until it is rolled out; see lib/portals/feature-flags.ts for
-// THE RULE). For a client WITHOUT the flag nothing here runs: the Team page
-// renders exactly as before and the SMS notifier receives today's payload.
+// Per client: the `team_sms_notifications` feature flag, switched on and off
+// by staff with the "SMS" switch on the Client Portals page (or by SQL; see
+// lib/portals/feature-flags.ts). Off: the portal Team page is exactly as
+// before and NOTHING is sent to the SMS notifier for that client. On: the
+// Team page shows a per-member SMS switch, and Introductions go to the
+// notifier with only the members switched on, marked approved.
 //
-// The choice lives in client_team_members.receives_sms (migration 0077,
-// default true). It is read ONLY through the separate, error-checked
+// The approval mark (SMS_APPROVED_FIELD) is the contract with the notifier:
+// it texts only Introductions that carry it. Anything else that posts to the
+// notifier, such as BrokerStaffer OS's own copy of this webhook, is ignored
+// there, so these switches can't be bypassed.
+//
+// The per-member choice lives in client_team_members.receives_sms (migration
+// 0077, default true). It is read ONLY through the separate, error-checked
 // queries below, never added to the shared selects in loadTeamMembers
 // (lib/portals/portal-data.ts) or lib/webhooks/n8n-introduction.ts. Those
 // swallow errors, so a column missing from them would quietly empty every
@@ -20,6 +28,10 @@ import { chunkedRun } from "@/lib/db/chunked-in";
 import { clientHasFeature } from "@/lib/portals/feature-flags";
 
 export const TEAM_SMS_FLAG = "team_sms_notifications";
+
+// Field on the notifier payload saying "Masterinbox approved this for SMS".
+// The notifier (services/loopmessage-notifier) requires it to be true.
+export const SMS_APPROVED_FIELD = "sms_enabled";
 
 type Admin = ReturnType<typeof createAdminSupabase>;
 
@@ -54,18 +66,18 @@ export async function loadTeamSmsSettings(
 }
 
 /**
- * Intro webhook: the SMS recipients for every FLAGGED client in a batch.
+ * Intro webhook: the SMS recipients for every client in a batch that has
+ * SMS alerts on.
  *
- *   - client not flagged      -> absent from the map; the caller sends
- *                                today's payload unchanged
- *   - flagged, read succeeded -> { ok: true, team } (active, has a phone,
- *                                SMS switched on)
- *   - flagged, read failed    -> { ok: false }; the caller texts no one for
- *                                that client, because it can't see who was
- *                                switched off
+ *   - SMS alerts off           -> absent from the map; nothing is sent to
+ *                                 the notifier for that client
+ *   - on, read succeeded       -> { ok: true, team } (active, has a phone,
+ *                                 SMS switched on)
+ *   - on, switches unreadable  -> { ok: false }; no texts for that client,
+ *                                 because it can't see who was switched off
  *
- * If the feature flags themselves can't be read, returns null, which the
- * caller treats as "no client flagged": today's behaviour for everyone.
+ * If the feature flags themselves can't be read, returns null: no texts for
+ * anyone in the batch, since it can't tell which clients have SMS on.
  */
 export async function loadSmsRecipients(
   admin: Admin,
@@ -117,15 +129,16 @@ export async function loadSmsRecipients(
 
 /**
  * The body to POST to the SMS notifier for one entry, or null for "don't
- * POST". Unflagged clients get `payload` itself, untouched.
+ * POST": SMS alerts off, nobody switched on, or the settings unreadable.
+ * Always a new object, so the caller's payload (which Bison's is built
+ * from) is never changed.
  */
 export function smsBodyFor<T extends { team: SmsMember[] }>(
   payload: T,
   clientId: string,
   recipients: Map<string, SmsRecipients> | null,
-): T | null {
+): (T & { [SMS_APPROVED_FIELD]: true }) | null {
   const r = recipients?.get(clientId);
-  if (!r) return payload;
-  if (!r.ok || r.team.length === 0) return null;
-  return { ...payload, team: r.team };
+  if (!r || !r.ok || r.team.length === 0) return null;
+  return { ...payload, team: r.team, [SMS_APPROVED_FIELD]: true as const };
 }

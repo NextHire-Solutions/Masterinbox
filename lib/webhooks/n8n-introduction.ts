@@ -21,9 +21,10 @@
 // already invoke this inside next/server `after(...)`.
 //
 // N8N_INTRODUCTION_WEBHOOK_URL now points at the LoopMessage SMS
-// notifier. For clients with the team_sms_notifications flag, the
-// Team page's per-member SMS switches decide who is in ITS team[];
-// see lib/portals/team-sms.ts. Bison always gets the full team.
+// notifier. It is only POSTed to for clients with SMS alerts on (the
+// Client Portals page switch), with only the team members whose Team
+// page SMS switch is on, marked approved; see lib/portals/team-sms.ts.
+// Bison always gets the full team, whatever the SMS settings.
 
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import { chunkedRun } from "@/lib/db/chunked-in";
@@ -211,17 +212,17 @@ export async function notifyIntroduction(
           url: string;
           body: unknown;
         }> = [];
-        // SMS notifier: today's payload for clients without the
-        // team_sms_notifications flag. For flagged clients, only the
-        // members with SMS switched on, and no POST when that's nobody
-        // (or the switches couldn't be read). Bison is never affected.
+        // SMS notifier: only for clients with SMS alerts on, with only the
+        // members switched on, marked approved. No POST otherwise: SMS off,
+        // nobody switched on, or the settings couldn't be read. Bison is
+        // never affected.
         if (n8nUrl) {
           const smsBody = smsBodyFor(n8nPayload, row.client_id, smsRecipients);
           if (smsBody) {
             targets.push({ label: "n8n", url: n8nUrl, body: smsBody });
           } else {
             console.log(
-              `[n8n-introduction] no SMS for entry ${row.id}: no team member has SMS switched on, or the switches couldn't be read`,
+              `[n8n-introduction] no SMS for entry ${row.id}: SMS alerts off for this client, nobody switched on, or settings unreadable`,
             );
           }
         }

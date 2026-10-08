@@ -100,3 +100,21 @@ export function portalHasFeature(
 ): boolean {
   return clientHasFeature(client, flag);
 }
+
+// A copy of a client's flags map with ONE flag switched on (set to true)
+// or off (removed), every other flag kept exactly as it was. For the few
+// flags that staff turn on from the UI instead of SQL (e.g. SMS alerts on
+// the Client Portals page). A malformed map is treated as empty.
+export function withFeatureFlag(
+  flags: unknown,
+  flag: string,
+  on: boolean,
+): Record<string, unknown> {
+  const next: Record<string, unknown> =
+    flags && typeof flags === "object" && !Array.isArray(flags)
+      ? { ...(flags as Record<string, unknown>) }
+      : {};
+  if (on) next[flag] = true;
+  else delete next[flag];
+  return next;
+}

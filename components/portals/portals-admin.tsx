@@ -128,11 +128,12 @@ export function PortalsAdmin({ rows }: { rows: PortalClientRow[] }) {
 
         {/* ---- Client list ---- */}
         <div className="overflow-hidden rounded-2xl border border-[#ebecf0] bg-white shadow-sm">
-          <div className="grid grid-cols-[1fr_84px_128px_72px_128px] gap-3 border-b border-[#f0f1f4] bg-[#fafbfc] px-5 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-[#9aa0ab]">
+          <div className="grid grid-cols-[1fr_84px_128px_72px_72px_128px] gap-3 border-b border-[#f0f1f4] bg-[#fafbfc] px-5 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-[#9aa0ab]">
             <div>Client</div>
             <div className="text-center">Intros</div>
             <div>Last intro</div>
             <div className="text-center">Live</div>
+            <div className="text-center">SMS</div>
             <div className="text-right">Actions</div>
           </div>
 
@@ -154,6 +155,25 @@ export function PortalsAdmin({ rows }: { rows: PortalClientRow[] }) {
                     }
                   });
                 }}
+                onToggleSms={(enabled) => {
+                  // Turning SMS on texts real people, so it asks first.
+                  if (
+                    enabled &&
+                    !confirm(
+                      `Turn on SMS alerts for ${r.name}?\n\nFrom their next introduction, each person switched on in their portal's Team page gets a text (the first time, a welcome asking them to reply YES).`,
+                    )
+                  ) {
+                    return;
+                  }
+                  void patchPortal(r.id, { sms_alerts: enabled }).then((ok) => {
+                    if (ok) {
+                      toast.success(
+                        enabled ? `SMS alerts on for ${r.name}` : `SMS alerts off for ${r.name}`,
+                      );
+                      router.refresh();
+                    }
+                  });
+                }}
               />
             ))
           )}
@@ -162,6 +182,11 @@ export function PortalsAdmin({ rows }: { rows: PortalClientRow[] }) {
         <p className="mt-4 text-xs leading-relaxed text-[#9aa0ab]">
           Anyone with a portal link can open it — there is no password. Keep the
           random suffix in each URL so links can&apos;t be guessed.
+        </p>
+        <p className="mt-1.5 text-xs leading-relaxed text-[#9aa0ab]">
+          SMS: when on, the client&apos;s team gets a text for each new
+          introduction. Who on the team gets it is chosen with the SMS switches
+          on their portal&apos;s Team page.
         </p>
       </div>
 
@@ -242,10 +267,12 @@ function PortalRow({
   row,
   onEdit,
   onToggle,
+  onToggleSms,
 }: {
   row: PortalClientRow;
   onEdit: () => void;
   onToggle: (enabled: boolean) => void;
+  onToggleSms: (enabled: boolean) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const portalPath = row.portal_token ? `/portal/${row.portal_token}` : null;
@@ -268,7 +295,7 @@ function PortalRow({
   }
 
   return (
-    <div className="grid grid-cols-[1fr_84px_128px_72px_128px] items-center gap-3 border-b border-[#f0f1f4] px-5 py-3.5 transition-colors last:border-0 hover:bg-[#fafbfc]">
+    <div className="grid grid-cols-[1fr_84px_128px_72px_72px_128px] items-center gap-3 border-b border-[#f0f1f4] px-5 py-3.5 transition-colors last:border-0 hover:bg-[#fafbfc]">
       {/* Client */}
       <div className="flex min-w-0 items-center gap-3">
         <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-[#eaf2fd] text-xs font-semibold text-[#1565C0]">
@@ -313,6 +340,18 @@ function PortalRow({
           checked={row.portal_enabled}
           onCheckedChange={(v) => onToggle(Boolean(v))}
           aria-label="Portal enabled"
+        />
+      </div>
+
+      {/* SMS alerts toggle */}
+      <div
+        className="flex justify-center"
+        title={row.sms_alerts ? "Team gets a text for each new introduction" : "No SMS alerts"}
+      >
+        <Switch
+          checked={row.sms_alerts}
+          onCheckedChange={(v) => onToggleSms(Boolean(v))}
+          aria-label={`SMS alerts for ${row.name}`}
         />
       </div>
 
@@ -372,7 +411,7 @@ function IconAction({
 // PATCH helper shared by the toggle + the edit dialog.
 async function patchPortal(
   clientId: string,
-  patch: { portal_token?: string; portal_enabled?: boolean },
+  patch: { portal_token?: string; portal_enabled?: boolean; sms_alerts?: boolean },
 ): Promise<boolean> {
   const res = await fetch(`/api/clients/${clientId}`, {
     method: "PATCH",

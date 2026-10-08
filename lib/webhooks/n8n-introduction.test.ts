@@ -1,6 +1,7 @@
 /*
- * What the Introduction webhooks actually POST, with and without the Team
- * page's per-member SMS switches (team_sms_notifications flag).
+ * What the Introduction webhooks actually POST, with SMS alerts off and on
+ * (the team_sms_notifications flag, set from the Client Portals page) and
+ * with the Team page's per-member SMS switches.
  *
  * The real notifyIntroduction runs against the in-memory PostgREST (see
  * test/fake-postgrest.ts for why nothing here may touch the real database),
@@ -8,8 +9,9 @@
  *   sms.test   = N8N_INTRODUCTION_WEBHOOK_URL (the LoopMessage SMS notifier)
  *   bison.test = BISON_INTRODUCTION_WEBHOOK_URL (the orchestrator)
  *
- * The headline guards: a client WITHOUT the flag gets exactly today's
- * payload, and Bison's payload never changes, flag or not.
+ * The headline guards: a client with SMS alerts off sends NOTHING to the
+ * notifier, the notifier only ever gets approved bodies, and Bison's payload
+ * never changes, whatever the SMS settings.
  */
 
 import { test, mock } from "node:test";
@@ -68,7 +70,7 @@ function entry(id: string, clientId: string, clientName: string): Row {
   };
 }
 
-function seed({ demoFlagged = true, demoSwitches = { Eddy: true, Ryan: false, Amy: true } } = {}) {
+function seed({ demoSmsOn = true, demoSwitches = { Eddy: true, Ryan: false, Amy: true } } = {}) {
   db.reset();
   posts.length = 0;
   rejectQuery = null;
@@ -76,7 +78,7 @@ function seed({ demoFlagged = true, demoSwitches = { Eddy: true, Ryan: false, Am
     {
       id: DEMO,
       name: "Demo Portal",
-      feature_flags: demoFlagged ? { manage_stages: true, team_sms_notifications: true } : { manage_stages: true },
+      feature_flags: demoSmsOn ? { manage_stages: true, team_sms_notifications: true } : { manage_stages: true },
     },
     { id: OTHER, name: "Other Client", feature_flags: { manage_stages: true } },
   ]);
@@ -86,7 +88,6 @@ function seed({ demoFlagged = true, demoSwitches = { Eddy: true, Ryan: false, Am
     { client_id: DEMO, name: "Amy", phone: "8173711939", active: true, receives_sms: demoSwitches.Amy },
     { client_id: DEMO, name: "Inactive Ivy", phone: "2125550100", active: false, receives_sms: true },
     { client_id: DEMO, name: "No-Phone Nia", phone: null, active: true, receives_sms: true },
-    // Other has no flag, so its switches mean nothing: Oscar stays in.
     { client_id: OTHER, name: "Olivia", phone: "3105550111", active: true, receives_sms: true },
     { client_id: OTHER, name: "Oscar", phone: "3105550112", active: true, receives_sms: false },
   ]);
@@ -97,43 +98,45 @@ const names = (p: Post | undefined) => p?.body.team.map((m) => m.name);
 const post = (host: string, entryId: string) =>
   posts.find((p) => p.host === host && p.body.pipeline_entry_id === entryId);
 
-test("a client without the flag gets today's payload: switches ignored, same keys", async () => {
-  seed({ demoFlagged: false });
-  await notifyIntroduction(["e-demo"], "portal_stage_change");
-  const sms = post("sms.test", "e-demo");
-  assert.deepEqual(names(sms), ["Eddy", "Ryan", "Amy"], "active + phone, Ryan's switch ignored");
-  assert.deepEqual(Object.keys(sms!.body), [
-    "event", "occurred_at", "source", "pipeline_entry_id", "lead", "client", "team",
-  ]);
-  assert.deepEqual(sms!.body.team[1], { name: "Ryan", mobile: "+16475720433" });
+test("SMS alerts off: nothing is sent to the SMS notifier", async () => {
+  seed({ demoSmsOn: false });
+  await notifyIntroduction(["e-demo", "e-other"], "portal_stage_change");
+  assert.equal(posts.filter((p) => p.host === "sms.test").length, 0);
 });
 
-test("with the flag, the SMS notifier gets only members switched on", async () => {
+test("SMS alerts on: only members switched on, marked approved, same payload keys", async () => {
   seed();
   await notifyIntroduction(["e-demo"], "portal_stage_change");
-  assert.deepEqual(names(post("sms.test", "e-demo")), ["Eddy", "Amy"]);
+  const sms = post("sms.test", "e-demo");
+  assert.deepEqual(names(sms), ["Eddy", "Amy"], "Ryan off; inactive and phoneless never included");
+  assert.equal(sms!.body.sms_enabled, true);
+  assert.deepEqual(Object.keys(sms!.body), [
+    "event", "occurred_at", "source", "pipeline_entry_id", "lead", "client", "team", "sms_enabled",
+  ]);
+  assert.deepEqual(sms!.body.team[0], { name: "Eddy", mobile: "7184150537" });
 });
 
-test("the flag never changes Bison: full team, same body", async () => {
+test("Bison never changes: full team, no approval mark", async () => {
   seed();
   await notifyIntroduction(["e-demo"], "inbox_label"); // inbox + lead email → Bison fires
   const sms = post("sms.test", "e-demo")!;
   const bison = post("bison.test", "e-demo")!;
   assert.deepEqual(names(bison), ["Eddy", "Ryan", "Amy"]);
-  // Apart from team, the SMS body is the exact n8n payload Bison extends
-  // (Bison adds fields to lead and client, so those two are skipped).
+  assert.equal("sms_enabled" in bison.body, false);
+  // Apart from team and the mark, the SMS body is the exact n8n payload
+  // Bison extends (Bison adds fields to lead and client, so those are skipped).
   for (const [k, v] of Object.entries(sms.body)) {
-    if (k === "team" || k === "lead" || k === "client") continue;
+    if (["team", "sms_enabled", "lead", "client"].includes(k)) continue;
     assert.deepEqual(bison.body[k], v, `bison.${k}`);
   }
 });
 
-test("other clients in the same batch are untouched", async () => {
+test("in a mixed batch, only the client with SMS on reaches the notifier", async () => {
   seed();
   await notifyIntroduction(["e-demo", "e-other"], "inbox_label");
-  assert.deepEqual(names(post("sms.test", "e-other")), ["Olivia", "Oscar"]);
-  assert.deepEqual(names(post("bison.test", "e-other")), ["Olivia", "Oscar"]);
   assert.deepEqual(names(post("sms.test", "e-demo")), ["Eddy", "Amy"]);
+  assert.equal(post("sms.test", "e-other"), undefined);
+  assert.deepEqual(names(post("bison.test", "e-other")), ["Olivia", "Oscar"]);
 });
 
 test("everyone switched off: no SMS POST at all, Bison still fires", async () => {
@@ -143,24 +146,24 @@ test("everyone switched off: no SMS POST at all, Bison still fires", async () =>
   assert.deepEqual(names(post("bison.test", "e-demo")), ["Eddy", "Ryan", "Amy"]);
 });
 
-test("switches unreadable (column not migrated): no SMS for the flagged client only", async () => {
+test("switches unreadable (column not migrated): no texts, Bison unchanged", async () => {
   seed();
   rejectQuery = (u) => u.pathname.endsWith("/client_team_members") && u.search.includes("receives_sms");
   await notifyIntroduction(["e-demo", "e-other"], "inbox_label");
-  assert.equal(post("sms.test", "e-demo"), undefined, "can't see who opted out → text nobody");
-  assert.deepEqual(names(post("sms.test", "e-other")), ["Olivia", "Oscar"]);
+  assert.equal(posts.filter((p) => p.host === "sms.test").length, 0, "can't see who opted out → text nobody");
   assert.deepEqual(names(post("bison.test", "e-demo")), ["Eddy", "Ryan", "Amy"]);
 });
 
-test("feature flags unreadable: everyone keeps today's behaviour", async () => {
+test("SMS settings unreadable: no texts for anyone, Bison unchanged", async () => {
   seed();
   rejectQuery = (u) => u.pathname.endsWith("/clients") && (u.searchParams.get("select") ?? "").includes("feature_flags");
-  await notifyIntroduction(["e-demo", "e-other"], "portal_stage_change");
-  assert.deepEqual(names(post("sms.test", "e-demo")), ["Eddy", "Ryan", "Amy"]);
-  assert.deepEqual(names(post("sms.test", "e-other")), ["Olivia", "Oscar"]);
+  await notifyIntroduction(["e-demo", "e-other"], "inbox_label");
+  assert.equal(posts.filter((p) => p.host === "sms.test").length, 0);
+  assert.deepEqual(names(post("bison.test", "e-demo")), ["Eddy", "Ryan", "Amy"]);
+  assert.deepEqual(names(post("bison.test", "e-other")), ["Olivia", "Oscar"]);
 });
 
-test("no switch reads happen when the SMS webhook isn't configured", async () => {
+test("no SMS settings are read when the SMS webhook isn't configured", async () => {
   seed();
   const saved = process.env.N8N_INTRODUCTION_WEBHOOK_URL;
   delete process.env.N8N_INTRODUCTION_WEBHOOK_URL;
@@ -171,4 +174,5 @@ test("no switch reads happen when the SMS webhook isn't configured", async () =>
   }
   assert.equal(post("sms.test", "e-demo"), undefined);
   assert.equal(db.calls.filter((c) => c.table === "clients").length, 0);
+  assert.deepEqual(names(post("bison.test", "e-demo")), ["Eddy", "Ryan", "Amy"]);
 });

@@ -120,13 +120,16 @@ test("if the switches can't be read, the page gets null (SMS column hidden)", as
   assert.equal(await loadTeamSmsSettings(DEMO), null);
 });
 
-test("smsBodyFor: unflagged keeps the payload, flagged filters, empty or unreadable sends nothing", () => {
-  const payload = { event: "lead.introduction", team: [{ name: "A", mobile: "1" }, { name: "B", mobile: "2" }] };
-  assert.equal(smsBodyFor(payload, "x", null), payload);
-  assert.equal(smsBodyFor(payload, "x", new Map()), payload);
-  const only = smsBodyFor(payload, "x", new Map([["x", { ok: true as const, team: [{ name: "A", mobile: "1" }] }]]));
-  assert.deepEqual(only, { event: "lead.introduction", team: [{ name: "A", mobile: "1" }] });
+test("smsBodyFor: SMS off, nobody on, or unreadable sends nothing; on sends the team, marked approved", () => {
+  const A = { name: "A", mobile: "1" };
+  const B = { name: "B", mobile: "2" };
+  const payload = { event: "lead.introduction", team: [A, B] };
+  assert.equal(smsBodyFor(payload, "x", null), null, "settings unreadable");
+  assert.equal(smsBodyFor(payload, "x", new Map()), null, "SMS alerts off");
+  const only = smsBodyFor(payload, "x", new Map([["x", { ok: true as const, team: [A] }]]));
+  assert.deepEqual(only, { event: "lead.introduction", team: [A], sms_enabled: true });
   assert.notEqual(only, payload, "a copy, never the shared object");
+  assert.deepEqual(payload.team, [A, B], "the shared payload (Bison's base) is untouched");
   assert.equal(smsBodyFor(payload, "x", new Map([["x", { ok: true as const, team: [] }]])), null);
   assert.equal(smsBodyFor(payload, "x", new Map([["x", { ok: false as const }]])), null);
 });
