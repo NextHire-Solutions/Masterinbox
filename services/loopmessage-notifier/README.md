@@ -89,6 +89,20 @@ Contact statuses in `/contacts`:
 | `unreachable` | LoopMessage says the number is invalid / not mobile |
 | `welcome_failed` | The welcome was refused or not delivered |
 
+## Who decides which clients are texted
+
+Masterinbox does. Staff turn **SMS** on or off per client on the Client
+Portals page; for a client that's on, the people switched on in their
+portal's Team page are the team[] Masterinbox sends here. Every
+Introduction Masterinbox approves for SMS carries `"sms_enabled": true`,
+and this service texts nothing without it (logged as
+`sms_not_approved`). That keeps out BrokerStaffer OS's own copy of the
+introduction webhook and any older app build, neither of which knows about
+the switches.
+
+With that in place `NOTIFY_CLIENTS` can be `*`; it stays as an emergency
+brake (empty = text nobody).
+
 ## Rollout controls
 
 | Variable | Effect |

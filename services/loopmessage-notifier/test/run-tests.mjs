@@ -69,6 +69,9 @@ const PINNED = {
   occurred_at: "2026-06-11T14:26:44.658Z",
   source: "inbox_label",
   pipeline_entry_id: "537ea483-e501-4595-abbd-7d2c0c8b30fd",
+  // Masterinbox's SMS approval (lib/portals/team-sms.ts), present on
+  // every Introduction it sends for a client with SMS alerts on.
+  sms_enabled: true,
   lead: {
     name: "Radhamilca Tucker",
     email: "rtucker@christiesrealestategroup.com",
@@ -129,6 +132,7 @@ function intro(entryId, team, { client = { id: "c-demo", name: "Demo Portal" } }
     event: "lead.introduction",
     source: "portal_add_lead",
     pipeline_entry_id: entryId,
+    sms_enabled: true,
     lead: PINNED.lead,
     client,
     team,
@@ -383,6 +387,30 @@ await test("override falls back to the first named member, then 'there'", () => 
   const plan = planNotifications({ ...DEMO, team: [] }, { testRecipientOverride: "+17184150537" });
   assert.equal(plan.recipients.length, 1, "still plans when the team is empty");
   assert.ok(plan.recipients[0].text.startsWith("Hi there,"));
+});
+
+await test("an Introduction without Masterinbox's SMS approval is not texted", () => {
+  const { sms_enabled: _approved, ...unapproved } = PINNED;
+  const plan = planNotifications(unapproved);
+  assert.equal(plan.ok, true);
+  assert.equal(plan.ignored, "sms_not_approved");
+  assert.equal(plan.recipients.length, 0);
+});
+
+await test("only a literal true counts as approval", () => {
+  for (const v of ["true", 1, "yes", null, false]) {
+    assert.equal(planNotifications({ ...PINNED, sms_enabled: v }).ignored, "sms_not_approved", String(v));
+  }
+});
+
+await test("unapproved Introductions never reach the engine, even for an allowed client", async () => {
+  const engine = engineStub();
+  const { sms_enabled: _approved, ...unapproved } = DEMO;
+  const res = await processIntroduction(unapproved, {
+    engine, logger: quiet, clientFilter: parseClientList("*"),
+  });
+  assert.equal(engine.calls.length, 0);
+  assert.equal(res.ignored, "sms_not_approved");
 });
 
 await test("an invalid override number is refused, not sent", () => {

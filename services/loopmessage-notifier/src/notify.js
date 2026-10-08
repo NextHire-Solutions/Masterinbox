@@ -169,6 +169,16 @@ export function planNotifications(
     source: payload.source ?? null,
   };
 
+  // Masterinbox marks every Introduction it approves for SMS: the client has
+  // SMS alerts on (Client Portals page) and team[] is already only the
+  // people switched on in the client's Team page (lib/portals/team-sms.ts).
+  // Anything without the mark is not texted. That covers older app builds
+  // and BrokerStaffer OS's own copy of this webhook, which knows nothing
+  // about those switches, so the switches can't be bypassed.
+  if (payload.sms_enabled !== true) {
+    return { ...base, ignored: "sms_not_approved", recipients: [], skipped: [] };
+  }
+
   if (clientFilter && !clientFilter.matches(client)) {
     return { ...base, ignored: "client_not_enabled", recipients: [], skipped: [] };
   }
@@ -259,7 +269,7 @@ export async function processIntroduction(payload, deps) {
     logger.log(
       JSON.stringify({
         level: "info",
-        msg: "client_not_enabled",
+        msg: plan.ignored,
         entry_id: plan.entryId,
         client: plan.clientName,
         client_id: plan.clientId,
