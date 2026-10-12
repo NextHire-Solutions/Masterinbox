@@ -11,9 +11,10 @@
 // convention BISON_INTRODUCTION_WEBHOOK_URL already uses in this project;
 // this endpoint is on a guessable Railway domain, so an open route would
 // let anyone spend the LoopMessage balance. The caller fires inside
-// next/server after() with a 10s timeout and ignores the response, so we
-// ack once the payload is valid and work in the background. ?wait=1 blocks
-// on the result instead, and &dry_run=1 previews without changing anything.
+// next/server after() with a 10s timeout, never retries and ignores the
+// response, so we answer 202 once the introduction is saved to disk and
+// route it in the background. ?wait=1 blocks on the result instead, and
+// &dry_run=1 previews without changing anything.
 //
 // LoopMessage's webhook is authenticated by the Authorization header value
 // configured next to the URL in the LoopMessage dashboard (?token= also
@@ -21,7 +22,7 @@
 
 import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { parseClientList, processIntroduction, isSafeInitialText } from "./notify.js";
 import { DEFAULT_BASE_URL, listSenders, sendMessage } from "./loopmessage.js";
 import { normalizePhone } from "./phone.js";
@@ -43,7 +44,7 @@ function numberEnv(name, fallback, { min = 0 } = {}) {
   const raw = env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
   const n = Number(raw);
-  if (!Number.isFinite(n) || n < min) fatal("invalid_env", { var: name, value: raw });
+  if (!Number.isFinite(n) || n < min) fatal("invalid_env", { var: name, value: raw, minimum: min });
   return n;
 }
 
@@ -59,6 +60,14 @@ const CLIENT_FILTER = parseClientList(env.NOTIFY_CLIENTS);
 const TEST_RECIPIENT_OVERRIDE = env.TEST_RECIPIENT_OVERRIDE?.trim() || null;
 const BRAND = env.WELCOME_BRAND?.trim() || "BrokerStaffer";
 const TICK_MS = numberEnv("TICK_SECONDS", 15, { min: 1 }) * 1000;
+
+// LoopMessage's minimums: 15 minutes between new conversations, 2 minutes
+// between messages to people who haven't texted recently. Going below them
+// risks the sender being blocked, so it takes an explicit opt-in (local
+// testing against a mock).
+const FAST_PACING = env.ALLOW_FAST_PACING === "1";
+const INIT_INTERVAL_MINUTES = numberEnv("INIT_INTERVAL_MINUTES", 15, { min: FAST_PACING ? 0 : 15 });
+const COLD_INTERVAL_SECONDS = numberEnv("COLD_SEND_INTERVAL_SECONDS", 120, { min: FAST_PACING ? 0 : 120 });
 
 const missing = [];
 if (!API_KEY) missing.push("LOOPMESSAGE_API_KEY");
@@ -91,22 +100,23 @@ if (!CLIENT_FILTER.all && CLIENT_FILTER.size === 0) {
 }
 
 // State has to survive redeploys (Railway redeploys on every variable
-// change). On Railway that means a volume; RAILWAY_VOLUME_MOUNT_PATH is set
-// when one is attached.
+// change): forgetting it would forget opt-outs. On Railway only a volume
+// survives, and RAILWAY_VOLUME_MOUNT_PATH is set when one is attached.
+const ON_RAILWAY = Boolean(env.RAILWAY_PROJECT_ID || env.RAILWAY_ENVIRONMENT_ID || env.RAILWAY_SERVICE_ID);
 const VOLUME = env.RAILWAY_VOLUME_MOUNT_PATH;
 const STATE_PATH =
   env.STATE_PATH ||
   (VOLUME ? join(VOLUME, "notifier-state.json") : join(process.cwd(), "data", "notifier-state.json"));
-const STATE_PERSISTENT = Boolean(env.STATE_PATH || VOLUME);
+const STATE_PERSISTENT = ON_RAILWAY
+  ? Boolean(VOLUME) && resolve(STATE_PATH).startsWith(resolve(VOLUME) + sep)
+  : true;
 if (!STATE_PERSISTENT) {
-  console.warn(
-    JSON.stringify({
-      level: "warn",
-      msg: "state_not_persistent",
-      detail: "no Railway volume attached; consent and pacing reset on every redeploy",
-      path: STATE_PATH,
-    }),
-  );
+  const fields = {
+    detail: "state isn't on a Railway volume; opt-outs, consent and pacing would reset on every redeploy",
+    path: STATE_PATH,
+  };
+  if (env.ALLOW_EPHEMERAL_STATE !== "1") fatal("state_not_persistent", fields);
+  console.warn(JSON.stringify({ level: "warn", msg: "state_not_persistent", ...fields }));
 }
 
 const engine = new Engine({
@@ -122,10 +132,10 @@ const engine = new Engine({
       passthrough,
     }),
   config: {
-    initIntervalMs: numberEnv("INIT_INTERVAL_MINUTES", 15) * MINUTE,
+    initIntervalMs: INIT_INTERVAL_MINUTES * MINUTE,
     // Unset = LoopMessage's warm-up schedule (2/day rising to 50/day).
     initDailyCap: env.INIT_DAILY_CAP?.trim() ? numberEnv("INIT_DAILY_CAP", 2) : null,
-    coldIntervalMs: numberEnv("COLD_SEND_INTERVAL_SECONDS", 120) * 1000,
+    coldIntervalMs: COLD_INTERVAL_SECONDS * 1000,
     recentInboundMs: numberEnv("RECENT_INBOUND_HOURS", 24) * HOUR,
     holdTtlMs: numberEnv("HOLD_TTL_HOURS", 24) * HOUR,
     brand: BRAND,
@@ -189,6 +199,7 @@ async function readJson(req, res) {
   try {
     return JSON.parse(raw);
   } catch {
+    console.warn(JSON.stringify({ level: "warn", msg: "invalid_json", path: req.url?.split("?")[0] ?? null }));
     json(res, 400, { ok: false, error: "invalid_json" });
     return undefined;
   }
@@ -203,20 +214,24 @@ async function handleIntroduction(req, res, url) {
   const payload = await readJson(req, res);
   if (payload === undefined) return;
 
-  const opts = {
+  const dryRun = url.searchParams.get("dry_run") === "1";
+  const wait = dryRun || url.searchParams.get("wait") === "1";
+  const result = await processIntroduction(payload, {
     engine,
     defaultCountryCode: DEFAULT_COUNTRY_CODE,
     clientFilter: CLIENT_FILTER,
     testRecipientOverride: TEST_RECIPIENT_OVERRIDE,
-    dryRun: url.searchParams.get("dry_run") === "1",
-  };
+    dryRun,
+    // The normal path: saved before we answer, routed in the background.
+    enqueue: !wait,
+  });
 
-  if (url.searchParams.get("wait") === "1") {
-    const result = await processIntroduction(payload, opts);
-    return json(res, result.ok ? 200 : 400, result);
-  }
-
-  processIntroduction(payload, opts).catch((err) => logError("introduction_failed", err));
+  if (!result.ok) return json(res, 400, result);
+  if (wait) return json(res, result.saved === false ? 503 : 200, result);
+  if (result.ignored) return json(res, 202, { ok: true, ignored: result.ignored });
+  // The disk write failed: it's still routed by this process, but say so
+  // (Masterinbox logs any non-2xx), since a restart would lose it.
+  if (result.saved === false) return json(res, 503, { ok: false, error: "state_not_saved", accepted: true });
   return json(res, 202, { ok: true, accepted: true });
 }
 
@@ -235,15 +250,13 @@ async function handleLoopMessageWebhook(req, res, url) {
 
   const evt = parseLoopEvent(payload);
   try {
-    if (evt.type === "inbound") {
-      // Saves consent (fast) before answering; releasing held alerts runs
-      // after, so LoopMessage's 15-second timeout isn't at risk.
-      const outcome = await engine.handleInbound(evt);
-      return json(res, 200, { ok: true, ...outcome, release: undefined });
-    }
-    if (evt.type === "status") {
-      const outcome = await engine.handleStatusEvent(evt);
-      return json(res, 200, { ok: true, ...outcome });
+    // Both are applied and saved synchronously, without waiting for any
+    // send in progress, so LoopMessage gets its 200 well inside 15s. If the
+    // save failed, a 503 makes LoopMessage deliver it again.
+    if (evt.type === "inbound" || evt.type === "status") {
+      const outcome = evt.type === "inbound" ? engine.handleInbound(evt) : engine.handleStatusEvent(evt);
+      const status = outcome.saved === false || outcome.retryLater ? 503 : 200;
+      return json(res, status, { ok: status === 200, ...outcome, release: undefined });
     }
     console.log(JSON.stringify({ level: "info", msg: "loopmessage_event_ignored", reason: evt.reason }));
     return json(res, 200, { ok: true, ignored: evt.reason });
@@ -255,11 +268,23 @@ async function handleLoopMessageWebhook(req, res, url) {
   }
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
+// Requests being read or answered right now; shutdown waits for them.
+let activeRequests = 0;
 
+const server = http.createServer(async (req, res) => {
+  activeRequests += 1;
+  res.on("close", () => {
+    activeRequests -= 1;
+  });
   try {
-    if (req.method === "GET" && url.pathname === "/health") {
+    // Parsed inside the try, against a fixed base: a malformed Host header
+    // or request target must not take the process down.
+    const url = new URL(req.url ?? "/", "http://localhost");
+    // Tolerate a trailing slash: a webhook URL pasted with one would
+    // otherwise silently 404 every reply.
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+
+    if (req.method === "GET" && path === "/health") {
       return json(res, 200, {
         ok: true,
         service: "loopmessage-notifier",
@@ -274,37 +299,41 @@ const server = http.createServer(async (req, res) => {
 
     // Verifies the LoopMessage key end to end. Token-protected because it
     // makes an upstream call and reveals sender ids.
-    if (req.method === "GET" && url.pathname === "/health/upstream") {
+    if (req.method === "GET" && path === "/health/upstream") {
       if (!hasAdminToken(req, url)) return json(res, 401, { ok: false, error: "unauthorized" });
       const senders = await listSenders({ baseUrl: BASE_URL, apiKey: API_KEY });
-      return json(res, senders.ok ? 200 : 502, {
-        ok: senders.ok,
-        status: senders.status,
-        senders: senders.body,
-      });
+      // The API can answer 200 with {"success": false} for a bad key.
+      const ok = senders.ok && senders.body?.success !== false;
+      return json(res, ok ? 200 : 502, { ok, status: senders.status, senders: senders.body });
     }
 
     // Who has replied, who is waiting, who opted out. Names and numbers,
     // so token-protected.
-    if (req.method === "GET" && url.pathname === "/contacts") {
+    if (req.method === "GET" && path === "/contacts") {
       if (!hasAdminToken(req, url)) return json(res, 401, { ok: false, error: "unauthorized" });
       return json(res, 200, { ok: true, ...engine.stats(), contacts: engine.snapshot() });
     }
 
-    if (req.method === "POST" && url.pathname === "/webhooks/introduction") {
+    if (req.method === "POST" && path === "/webhooks/introduction") {
       return await handleIntroduction(req, res, url);
     }
 
-    if (req.method === "POST" && url.pathname === "/webhooks/loopmessage") {
+    if (req.method === "POST" && path === "/webhooks/loopmessage") {
       return await handleLoopMessageWebhook(req, res, url);
     }
 
+    // Path only: the query string can carry a token.
+    console.warn(JSON.stringify({ level: "warn", msg: "not_found", method: req.method, path: url.pathname }));
     return json(res, 404, { ok: false, error: "not_found" });
   } catch (err) {
     logError("request_failed", err);
     if (!res.headersSent) return json(res, 500, { ok: false, error: "internal_error" });
   }
 });
+
+// Every promise chain here ends in a catch; if one is ever missed, log it
+// rather than let Node exit, since state is saved after every change.
+process.on("unhandledRejection", (err) => logError("unhandled_rejection", err));
 
 const timer = setInterval(() => {
   engine.tick().catch((err) => logError("tick_failed", err));
@@ -326,19 +355,45 @@ server.listen(PORT, () => {
       ...engine.stats(),
     }),
   );
+  // Also routes any introduction accepted just before the last shutdown.
   engine.tick().catch((err) => logError("tick_failed", err));
 });
 
-// Railway sends SIGTERM on redeploy: stop scheduling, let in-flight work
-// finish and save, then exit.
+// Railway sends SIGTERM on redeploy. Requests are still accepted while we
+// finish: an introduction is on disk before it's acknowledged and a reply
+// is saved before LoopMessage gets its 200, so whatever this process
+// doesn't get to, the next one does. Stop scheduling sends, then wait
+// until no request is still being received or answered and no send is in
+// progress, then exit. A send still running at the hard limit was marked
+// in flight before it started, so it won't be repeated.
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(JSON.stringify({ level: "info", msg: "shutting_down", signal }));
+  clearInterval(timer);
+  setTimeout(() => process.exit(0), 25_000).unref();
+  const deadline = Date.now() + 20_000;
+  let drained = false;
+  for (;;) {
+    const left = deadline - Date.now();
+    if (left <= 0) break;
+    drained = await engine.drain({ timeoutMs: left });
+    if (drained && activeRequests === 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  engine.persist();
+  console.log(
+    JSON.stringify({ level: "info", msg: "shutdown_complete", drained: drained && activeRequests === 0 }),
+  );
+  server.close();
+  process.exit(0);
+}
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
-    console.log(JSON.stringify({ level: "info", msg: "shutting_down", signal }));
-    clearInterval(timer);
-    setTimeout(() => process.exit(0), 10_000).unref();
-    engine
-      .idle()
-      .then(() => engine.persist())
-      .finally(() => server.close(() => process.exit(0)));
+    shutdown(signal).catch((err) => {
+      logError("shutdown_failed", err);
+      process.exit(1);
+    });
   });
 }

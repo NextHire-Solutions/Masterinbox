@@ -243,7 +243,9 @@ export function planNotifications(
 }
 
 /**
- * Plan the introduction and hand it to the delivery engine. `dryRun`
+ * Plan the introduction and hand it to the delivery engine. `enqueue` saves
+ * it for the engine to route in the background (the webhook's normal
+ * path); otherwise this waits for the per-recipient results. `dryRun`
  * previews what the engine would do without changing anything.
  */
 export async function processIntroduction(payload, deps) {
@@ -254,6 +256,7 @@ export async function processIntroduction(payload, deps) {
     testRecipientOverride = null,
     logger = console,
     dryRun = false,
+    enqueue = false,
   } = deps;
 
   const plan = planNotifications(payload, {
@@ -261,7 +264,17 @@ export async function processIntroduction(payload, deps) {
     clientFilter,
     testRecipientOverride,
   });
-  if (!plan.ok) return { ok: false, reason: plan.reason };
+  if (!plan.ok) {
+    logger.warn(
+      JSON.stringify({
+        level: "warn",
+        msg: "introduction_rejected",
+        reason: plan.reason,
+        entry_id: typeof payload?.pipeline_entry_id === "string" ? payload.pipeline_entry_id : null,
+      }),
+    );
+    return { ok: false, reason: plan.reason };
+  }
 
   if (plan.ignored) {
     // Logged with id as well as name so the exact value to put in
@@ -300,9 +313,26 @@ export async function processIntroduction(payload, deps) {
     );
   }
 
+  if (enqueue && !dryRun) {
+    const { saved } = engine.enqueueIntroduction(plan);
+    return {
+      ok: true,
+      accepted: true,
+      // false: the disk write failed; it's still routed unless the service
+      // restarts first.
+      saved,
+      entryId: plan.entryId,
+      client: plan.clientName,
+      testOverride: Boolean(plan.testOverride),
+      skipped: plan.skipped,
+    };
+  }
+
   const results = await engine.handleIntroduction(plan, { dryRun });
 
   return {
+    // false: the engine's state couldn't be written to disk afterwards.
+    saved: dryRun || engine.dirty !== true,
     ok: true,
     entryId: plan.entryId,
     client: plan.clientName,
