@@ -110,6 +110,8 @@ function AgentEditor({
   const [qualEnabled, setQualEnabled] = useState(agent.qualification.enabled);
   const [required, setRequired] = useState(agent.qualification.required);
   const [passRule, setPassRule] = useState(agent.qualification.passRule);
+  // Categories left to a person (14 Oct) — typed as a list, sent as an array.
+  const [skipLabels, setSkipLabels] = useState((agent.qualification.skipLabels ?? []).join(", "));
   const [cc, setCc] = useState(agent.handover.ccEmails.join(", "));
   const [handoverMessage, setHandoverMessage] = useState(agent.handover.message);
   const [schedule, setSchedule] = useState<AgentSchedule>(agent.schedule);
@@ -141,6 +143,7 @@ function AgentEditor({
               .map((q) => ({ id: q.id, text: q.text.trim() })),
             required,
             pass_rule: passRule,
+            skip_labels: skipLabels.split(",").map((x) => x.trim()).filter(Boolean),
           },
           handover: {
             cc_emails: cc
@@ -247,6 +250,27 @@ function AgentEditor({
                 );
               })
             )}
+          </div>
+        </Section>
+
+        {/* ---- categories left to a person (14 Oct) ---- */}
+        <Section
+          title="Categories left to a person"
+          sub="The agent answers every category of reply except the ones named here. A conversation carrying one of these labels is not drafted for and not sent to — a person handles it."
+        >
+          <div className="space-y-1.5">
+            <label htmlFor={`agent-skip-${agent.id}`} className="text-xs font-medium">Label names, separated by commas</label>
+            <Input
+              id={`agent-skip-${agent.id}`}
+              placeholder="Interested"
+              value={skipLabels}
+              onChange={(e) => setSkipLabels(e.target.value)}
+              className="h-8 text-sm"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Exact names, as they appear in the inbox — &ldquo;Interested&rdquo; does not match &ldquo;Not Interested&rdquo;.
+              Leave empty for the agent to answer every category.
+            </p>
           </div>
         </Section>
 

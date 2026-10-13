@@ -528,6 +528,11 @@ export function ReplyAgentsManager({
                 <span>
                   {a.qualification.enabled ? `${a.qualification.questions.length} asked` : "None"}
                 </span>
+                {/* Categories it does not answer (14 Oct). */}
+                <span className="text-muted-foreground">Left to a person</span>
+                <span className="truncate" data-agent-skip-labels>
+                  {(a.qualification.skipLabels ?? []).length ? (a.qualification.skipLabels ?? []).join(", ") : "Nothing — answers every category"}
+                </span>
                 <span className="text-muted-foreground">Handover</span>
                 <span className="truncate" title={a.handover.ccEmails.join(", ")}>
                   {a.handover.ccEmails.length > 0

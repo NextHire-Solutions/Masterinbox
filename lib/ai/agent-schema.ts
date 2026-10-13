@@ -72,6 +72,12 @@ export const qualificationSchema = z.object({
     .max(10),
   required: z.number().int().min(0).max(10),
   pass_rule: z.enum(["all_answered", "any_answered"]),
+  /*
+   * Categories the agent leaves to a person (13 Oct). Optional so a screen
+   * that does not send it changes nothing: an omitted list keeps the default
+   * (Interested); an EMPTY list is a choice to answer everything.
+   */
+  skip_labels: z.array(z.string().trim().min(1).max(80)).max(20).optional(),
 });
 
 export const handoverSchema = z.object({

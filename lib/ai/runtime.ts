@@ -9,7 +9,7 @@
 import { INTRO_ROW_COLUMNS, introClientFromRow, routeIntro } from "@/lib/inbox/intro-macro";
 import { rosterRowForPortal } from "@/lib/clients/roster-for-portal";
 import { createDraftForAgent, loadAgentWithKey, loadAgents, type ReplyAgent } from "./agent";
-import { selectAgentForThread, type SelectableAgent } from "./agent-config";
+import { labelLeftToAPerson, selectAgentForThread, type SelectableAgent } from "./agent-config";
 import {
   advance,
   planHandover,
@@ -63,6 +63,11 @@ export interface RunAgentInput {
   clientId: string | null;
   /** The inbound message that triggered this run; guards against double-acting. */
   inboundMessageId: string | null;
+  /**
+   * The labels on the conversation right now. Null = could not be read (the
+   * agent then holds if it has a skip list). Omitted = none — see step 1b.
+   */
+  threadLabels?: string[] | null;
   inboundText: string | null;
   leadName: string | null;
   leadEmail: string | null;
@@ -129,6 +134,18 @@ export interface HandoverSummary {
 export type RunAgentOutcome =
   | { status: "no_agent"; reason: string }
   | { status: "paused"; agentId: string; agentName: string }
+  | {
+      /**
+       * The conversation carries a category this agent leaves to a person
+       * (13 Oct — `skipLabels`). Nothing was drafted and nothing was written.
+       * `label` is null when the labels could not be read and the agent held
+       * rather than guess.
+       */
+      status: "left_to_person";
+      agentId: string;
+      agentName: string;
+      label: string | null;
+    }
   | { status: "already_handled"; agentId: string }
   | { status: "finished"; agentId: string; state: QualificationState["status"] }
   | { status: "no_key"; agentId: string; agentName: string }
@@ -222,6 +239,28 @@ export async function runReplyAgentOnInbound(input: RunAgentInput): Promise<RunA
     return { status: "paused", agentId: selection.agent.id, agentName: selection.agent.name };
   }
   const agent = agents.find((a) => a.id === selection.agent.id)!;
+
+  /*
+   * ---- 1b. categories this agent leaves to a person (13 Oct) --------------
+   *
+   * "Respond to all categories except Interested": a conversation labelled
+   * with one of the agent's `skipLabels` is not the agent's to answer. Checked
+   * BEFORE any state is read or written and before a model is called, so a
+   * skipped conversation costs nothing and leaves no trace for a later run to
+   * trip over — if the label is removed, the next reply is handled normally.
+   *
+   * `threadLabels` null means the labels could not be read. With a skip list
+   * in force that is a hold, not a guess: answering an Interested lead by
+   * mistake is the thing this setting exists to prevent. Undefined (a caller
+   * that does not supply labels) is "no labels", which is the old behaviour.
+   */
+  if (agent.qualification.skipLabels.length > 0) {
+    if (input.threadLabels === null) {
+      return { status: "left_to_person", agentId: agent.id, agentName: agent.name, label: null };
+    }
+    const label = labelLeftToAPerson(input.threadLabels ?? [], agent.qualification.skipLabels);
+    if (label) return { status: "left_to_person", agentId: agent.id, agentName: agent.name, label };
+  }
 
   // ---- 2. where this conversation had got to ------------------------------
   const read = await loadThreadState(input.threadId, agent.id);
@@ -698,11 +737,36 @@ export async function assembleRunInput(
   const clientId = (thread.client_id as string | null) ?? null;
   const introduction = await resolveIntroduction(clientId, (thread.campaign_name as string | null) ?? null);
 
+  /*
+   * The labels on the conversation, for the agent's "left to a person" list
+   * (13 Oct). Read the way safety-facts.ts reads them. Null on a failed read —
+   * never an empty list, which would say "no labels" about a conversation
+   * nobody looked at.
+   */
+  let threadLabels: string[] | null = null;
+  try {
+    const { data, error } = await admin
+      .from("label_assignments")
+      .select("labels:label_id(name)")
+      .eq("target_type", "thread")
+      .eq("target_id", threadId);
+    if (error) throw new Error(error.message);
+    threadLabels = (data ?? [])
+      .map((r) => {
+        const l = Array.isArray(r.labels) ? r.labels[0] : r.labels;
+        return ((l as { name?: string } | null)?.name ?? "").trim();
+      })
+      .filter(Boolean);
+  } catch (err) {
+    console.error("[agent] label lookup failed; an agent with a skip list will hold", err);
+  }
+
   return {
     workspaceId,
     threadId,
     channelId: (thread.channel_id as string | null) ?? null,
     clientId,
+    threadLabels,
     inboundMessageId: (lastInbound?.id as string | null) ?? null,
     inboundText:
       (lastInbound?.body_text as string | null) ??

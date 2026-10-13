@@ -96,7 +96,7 @@ const liveAgent = () => ({
   run_mode: "live" as const,
   client_ids: [],
   schedule: { kind: "always" as const, timezone: "America/New_York", businessDays: [1, 2, 3, 4, 5], businessStart: "09:00", businessEnd: "18:00" },
-  qualification: { enabled: false, questions: [], required: 0, passRule: "all_answered" as const },
+  qualification: { enabled: false, questions: [], required: 0, passRule: "all_answered" as const, skipLabels: [] as string[] },
   handover: { ccEmails: [], message: "" },
 });
 

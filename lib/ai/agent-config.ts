@@ -69,6 +69,46 @@ export interface AgentQualification {
   /** How many answers are needed before handover. 0 = all of them. */
   required: number;
   passRule: "all_answered" | "any_answered";
+  /*
+   * Categories (labels) this agent leaves to a person (13 Oct, OS feedback:
+   * "Enable AI Reply Agent to respond to all categories except Interested").
+   * A conversation carrying one of them is not answered at all — no draft, no
+   * send. See `labelLeftToAPerson`.
+   */
+  skipLabels: string[];
+}
+
+/*
+ * What an agent that has never had the setting touched leaves alone:
+ * Interested. Those are the leads a person introduces to the client.
+ * An agent whose list was saved EMPTY answers every category — the empty list
+ * is a choice and is kept; only a missing list gets this default.
+ */
+export const DEFAULT_SKIP_LABELS: readonly string[] = ["Interested"];
+const MAX_SKIP_LABELS = 20;
+
+export function parseSkipLabels(value: unknown): string[] {
+  if (!Array.isArray(value)) return [...DEFAULT_SKIP_LABELS];
+  const out: string[] = [];
+  for (const v of value) {
+    if (typeof v !== "string") continue;
+    const label = v.trim().slice(0, 80);
+    if (!label || out.some((x) => x.toLowerCase() === label.toLowerCase())) continue;
+    out.push(label);
+    if (out.length >= MAX_SKIP_LABELS) break;
+  }
+  return out;
+}
+
+/*
+ * The label on this conversation that hands it to a person, or null when the
+ * agent may answer. Exact label name, any case — "Interested" is not "Not
+ * Interested", and a label merely containing the word must not match.
+ */
+export function labelLeftToAPerson(threadLabels: readonly string[], skipLabels: readonly string[]): string | null {
+  const skip = new Set(skipLabels.map((l) => l.trim().toLowerCase()).filter(Boolean));
+  if (!skip.size) return null;
+  return threadLabels.find((l) => skip.has(l.trim().toLowerCase())) ?? null;
 }
 
 /**
@@ -134,6 +174,7 @@ export const DEFAULT_QUALIFICATION: AgentQualification = {
   questions: [],
   required: 0,
   passRule: "all_answered",
+  skipLabels: [...DEFAULT_SKIP_LABELS],
 };
 
 export const DEFAULT_HANDOVER: AgentHandover = {
@@ -233,6 +274,7 @@ export function parseQualification(value: unknown): AgentQualification {
     questions,
     required,
     passRule: raw.pass_rule === "any_answered" ? "any_answered" : "all_answered",
+    skipLabels: parseSkipLabels(raw.skip_labels),
   };
 }
 
@@ -242,6 +284,7 @@ export function qualificationToJson(q: AgentQualification): Record<string, unkno
     questions: q.questions.map((x) => ({ id: x.id, text: x.text })),
     required: q.required,
     pass_rule: q.passRule,
+    skip_labels: q.skipLabels,
   };
 }
 
