@@ -59,6 +59,10 @@ export function formatLeadPhone(raw) {
 // It contains the lead's phone number, which LoopMessage forbids in a FIRST
 // message, so it is only ever sent to someone who has already messaged the
 // sender (the engine guarantees that).
+//
+// No opt-out line of our own: LoopMessage appends "To opt-out reply: stop"
+// itself, and with ours the alert said it twice (client, Oct 2026). STOP
+// works whether or not the line is shown.
 export function buildText(teamMemberName, lead = {}) {
   const first = firstNameOf(teamMemberName) || "there";
   const details = [];
@@ -69,8 +73,6 @@ export function buildText(teamMemberName, lead = {}) {
   return [
     `Hi ${first}, you have a new agent in the Introduction stage.`,
     ...(details.length > 0 ? ["", ...details] : []),
-    "",
-    "To opt out, reply STOP.",
   ].join("\n");
 }
 

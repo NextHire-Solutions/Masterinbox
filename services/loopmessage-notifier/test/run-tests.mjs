@@ -303,7 +303,8 @@ await test("empty team is valid but plans nothing", () => {
 console.log("\ncopy");
 
 await test("alert text is exactly the client's approved example", () => {
-  // Eddy's wording, Oct 2026: agent, phone, brokerage; no email.
+  // Eddy's wording, Oct 2026: agent, phone, brokerage; no email. No opt-out
+  // line of ours: LoopMessage appends its own, and two looked wrong.
   assert.equal(
     buildText("Eddy", {
       name: "Laura Wilson",
@@ -314,8 +315,7 @@ await test("alert text is exactly the client's approved example", () => {
     "Hi Eddy, you have a new agent in the Introduction stage.\n\n" +
       "Agent: Laura Wilson\n" +
       "Phone: (665) 234-1234\n" +
-      "Brokerage: Legacy Realty Group\n\n" +
-      "To opt out, reply STOP.",
+      "Brokerage: Legacy Realty Group",
   );
 });
 
@@ -325,20 +325,20 @@ await test("the alert greets by first name and never includes the email", () => 
     text,
     "Hi Lara, you have a new agent in the Introduction stage.\n\n" +
       "Agent: Radhamilca Tucker\n" +
-      "Brokerage: Christies International Real Estate New York Llc\n\n" +
-      "To opt out, reply STOP.",
+      "Brokerage: Christies International Real Estate New York Llc",
   );
   assert.ok(!text.includes("@"));
+  assert.ok(!/stop/i.test(text), "LoopMessage adds the opt-out line; we don't repeat it");
 });
 
 await test("empty lead fields are omitted, not rendered as 'null'", () => {
   assert.equal(
     buildText("Sam", { name: "Jo", phone: null, company: null }),
-    "Hi Sam, you have a new agent in the Introduction stage.\n\nAgent: Jo\n\nTo opt out, reply STOP.",
+    "Hi Sam, you have a new agent in the Introduction stage.\n\nAgent: Jo",
   );
   assert.equal(
     buildText(null, {}),
-    "Hi there, you have a new agent in the Introduction stage.\n\nTo opt out, reply STOP.",
+    "Hi there, you have a new agent in the Introduction stage.",
   );
 });
 
@@ -647,7 +647,8 @@ await test("group chats, reactions and junk are ignored", () => {
 // gathered).
 const act = (text, stage, name = "Eddy Grant") => interpretReply(text, { name, stage }).action;
 const WELCOME = "Hi Eddy, this is BrokerStaffer. We'll text you here whenever a new agent is introduced to your team. Reply YES to start getting these, or STOP to opt out.";
-const ALERT = "Hi Eddy, you have a new agent in the Introduction stage.\n\nAgent: Laura Wilson\n\nTo opt out, reply STOP.";
+// As the recipient sees it: LoopMessage appends its opt-out line.
+const ALERT = "Hi Eddy, you have a new agent in the Introduction stage.\n\nAgent: Laura Wilson\nTo opt-out reply: stop";
 
 await test("after the welcome, a reply that is a yes starts alerts", () => {
   for (const t of [
@@ -1352,7 +1353,7 @@ await test("an alert held under the old wording goes out in the new wording", as
   assert.equal(
     h.sent[0].text,
     "Hi Eddy, you have a new agent in the Introduction stage.\n\n" +
-      "Agent: Laura Wilson\nBrokerage: Legacy Realty Group\n\nTo opt out, reply STOP.",
+      "Agent: Laura Wilson\nBrokerage: Legacy Realty Group",
   );
 });
 

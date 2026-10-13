@@ -228,7 +228,10 @@ back).
   meanwhile; they're on disk before they're answered, so the next process
   picks up whatever this one doesn't finish.
 - **Opt-out footer.** LoopMessage appends `To opt-out reply: stop` to at
-  least some US messages. The service doesn't add it and can't remove it.
+  least some US messages; the service can't remove it. The alert carries
+  no opt-out line of its own, so it isn't said twice (the welcome still
+  says "or STOP to opt out", as a first message must). Replying STOP works
+  whether or not a line is shown.
 - **Sender must be the name, not the id.** `sender-name-list` returns an
   `id` that the send endpoint rejects (code 220). `LOOPMESSAGE_SENDER_ID`
   must hold the sender's name, e.g. `+19453926102`.
