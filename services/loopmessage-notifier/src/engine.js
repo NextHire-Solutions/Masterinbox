@@ -11,7 +11,9 @@
 //   the person agree or unsubscribe.
 // - Once a person has messaged the sender, replies need no interval.
 // - Messages to people who haven't messaged recently need at least 2
-//   minutes between them. A welcome is one of those too.
+//   minutes between them, or the request may be rejected. A welcome is one
+//   of those too. (This one the operator chose not to follow for people
+//   who've opted in: see coldIntervalMs and slowDown.)
 // - If recipients report the sender, messages stop being delivered and the
 //   sender can be blocked — every alert, for every client, stops.
 //
@@ -55,7 +57,16 @@ export const DEFAULT_CONFIG = Object.freeze({
   initIntervalMs: 15 * MINUTE,
   // null = follow LoopMessage's warm-up schedule (warmupCap).
   initDailyCap: null,
-  coldIntervalMs: 2 * MINUTE,
+  // Spacing between texts to people who are opted in but haven't texted the
+  // sender in the last day (welcomes share it). LoopMessage's docs ask for 2
+  // minutes between such messages ("otherwise, your request may be
+  // rejected"). The operator chose one per scheduler pass, about every 15
+  // seconds (Oct 2026): everyone in this queue has opted in, and
+  // "recently" may well mean weeks. If LoopMessage objects with a 540, the
+  // service falls back to slowIntervalMs for slowModeMs (see slowDown).
+  coldIntervalMs: 10 * 1000,
+  slowIntervalMs: 2 * MINUTE,
+  slowModeMs: HOUR,
   // LoopMessage doesn't define "recently"; a day is the assumption.
   recentInboundMs: 24 * HOUR,
   holdTtlMs: 24 * HOUR,
@@ -77,7 +88,10 @@ export const DEFAULT_CONFIG = Object.freeze({
 const OPTED_OUT = new Set([500]);
 const INVALID_CONTACT = new Set([150, 160, 165, 170, 180, 190]);
 const NEEDS_INBOUND = new Set([510, 520, 530]);
+// 540: "You have reached the limit of sending messages to recipients who
+// have not been contacted for a long time." 550: the pricing plan's limit.
 const RATE_LIMITED = new Set([540, 550]);
+const TOO_FAST = 540;
 // Credentials, sender name or account problems: nothing about the contact
 // is wrong, so pause sending instead of failing the contact.
 const CONFIG_ERRORS = new Set([110, 130, 210, 220, 230, 240, 250, 260, 270, 290, 300, 310, 320, 330]);
@@ -180,6 +194,9 @@ function normalizeState(raw) {
       parkedByStreak: null,
       lastColdAt: null,
       coldBlockedUntil: null,
+      // While set and in the future, texts to people who haven't texted
+      // recently go at LoopMessage's documented pace (see slowDown).
+      slowUntil: null,
       ...(isObject(s.pacing) ? s.pacing : {}),
     },
   };
@@ -434,6 +451,26 @@ export class Engine {
     const p = this.state.pacing;
     p.initBlockedUntil = Math.max(p.initBlockedUntil ?? 0, until);
     p.coldBlockedUntil = Math.max(p.coldBlockedUntil ?? 0, until);
+  }
+
+  // The gap to keep between texts to people who haven't texted recently:
+  // the configured one, or LoopMessage's documented 2 minutes while slowed.
+  coldInterval(now) {
+    const p = this.state.pacing;
+    const slowed = p.slowUntil && now < p.slowUntil;
+    return slowed ? Math.max(this.config.coldIntervalMs, this.config.slowIntervalMs) : this.config.coldIntervalMs;
+  }
+
+  // LoopMessage said we're over its limit for people who haven't texted
+  // recently (540). Go at its documented pace for a while, and wait one
+  // such interval before the next try. If that's still refused, it's a
+  // limit and not our pace: pause for the usual hour.
+  slowDown(now) {
+    const p = this.state.pacing;
+    const alreadySlowed = p.slowUntil && now < p.slowUntil;
+    p.slowUntil = now + this.config.slowModeMs;
+    this.pauseSending(now + (alreadySlowed ? this.config.rateLimitBackoffMs : this.config.slowIntervalMs));
+    return alreadySlowed;
   }
 
   // -------------------------------------------------------------------------
@@ -704,11 +741,16 @@ export class Engine {
     }
     const senderProblem = rateLimited || CONFIG_ERRORS.has(code);
     if (senderProblem) {
-      // About the sender, not this person: pause everyone, whatever this
-      // person did meanwhile.
-      this.pauseSending(now + this.config.rateLimitBackoffMs);
+      // About the sender, not this person: slow down or pause everyone,
+      // whatever this person did meanwhile.
       const config = CONFIG_ERRORS.has(code);
-      this.log(config ? "error" : "warn", config ? "loopmessage_config_error" : "alert_rate_limited", fields);
+      if (code === TOO_FAST) {
+        const paused = this.slowDown(now);
+        this.log("warn", "loopmessage_limit_slowing_down", { ...fields, paused_for_an_hour: paused });
+      } else {
+        this.pauseSending(now + this.config.rateLimitBackoffMs);
+        this.log(config ? "error" : "warn", config ? "loopmessage_config_error" : "alert_rate_limited", fields);
+      }
     }
     // A STOP that arrived while this was being sent stands, whatever
     // LoopMessage says about the send.
@@ -1009,7 +1051,7 @@ export class Engine {
     if (p.coldBlockedUntil && now < p.coldBlockedUntil) return false;
     if (this.initsInWindow(now) >= this.dailyCap(now)) return false;
     if (p.lastInitAt && now - p.lastInitAt < this.config.initIntervalMs) return false;
-    if (p.lastColdAt && now - p.lastColdAt < this.config.coldIntervalMs) return false;
+    if (p.lastColdAt && now - p.lastColdAt < this.coldInterval(now)) return false;
 
     // Skip entries that no longer need a welcome (replied, opted out...).
     while (this.state.welcomeQueue.length > 0) {
@@ -1071,9 +1113,14 @@ export class Engine {
     // this person did meanwhile. They stay queued (if they still need a
     // welcome) and aren't counted against.
     if (RATE_LIMITED.has(code) || res.status === 429 || CONFIG_ERRORS.has(code)) {
-      this.pauseSending(t + this.config.rateLimitBackoffMs);
       const config = CONFIG_ERRORS.has(code);
-      this.log(config ? "error" : "warn", config ? "loopmessage_config_error" : "welcome_rate_limited", fields);
+      if (code === TOO_FAST) {
+        const paused = this.slowDown(t);
+        this.log("warn", "loopmessage_limit_slowing_down", { ...fields, paused_for_an_hour: paused });
+      } else {
+        this.pauseSending(t + this.config.rateLimitBackoffMs);
+        this.log(config ? "error" : "warn", config ? "loopmessage_config_error" : "welcome_rate_limited", fields);
+      }
       return true;
     }
     if (res.status == null) {
@@ -1145,7 +1192,7 @@ export class Engine {
   }
 
   // One alert from the outbox. Alerts to people who haven't texted recently
-  // keep 2 minutes from any other such message, welcomes included.
+  // keep coldInterval from any other such message, welcomes included.
   async maybeSendCold(now) {
     const p = this.state.pacing;
     if (p.coldBlockedUntil && now < p.coldBlockedUntil) return false;
@@ -1159,7 +1206,7 @@ export class Engine {
       if (c && !TERMINAL.has(c.status)) this.hold(c, item, now);
     }
 
-    const spaced = !p.lastColdAt || now - p.lastColdAt >= this.config.coldIntervalMs;
+    const spaced = !p.lastColdAt || now - p.lastColdAt >= this.coldInterval(now);
     const item = this.state.outbox.find(
       (i) => (!i.notBefore || i.notBefore <= now) && (spaced || this.isRecent(this.state.contacts[i.contact], now)),
     );
@@ -1327,6 +1374,8 @@ export class Engine {
       welcome_queue: this.state.welcomeQueue.length,
       paced_outbox: this.state.outbox.length,
       intake_pending: this.state.intake.length,
+      // true while slowed to LoopMessage's 2-minute pace after a 540
+      slowed_down: Boolean(this.state.pacing.slowUntil && now < this.state.pacing.slowUntil),
       welcomes_last_24h: this.initsInWindow(now),
       welcome_cap_24h: this.dailyCap(now),
       // LoopMessage wants this above ~30%.

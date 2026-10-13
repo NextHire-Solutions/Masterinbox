@@ -1114,13 +1114,28 @@ await test("INIT_DAILY_CAP overrides the warm-up", async () => {
   assert.equal(h.sent.length, 1);
 });
 
-await test("alerts to people quiet for a day are at least 2 minutes apart", async () => {
+await test("opted-in people who haven't texted that day get one text per pass, 15 seconds apart", async () => {
   const h = harness();
+  for (const c of [A_E164, B_E164, C_E164]) h.engine.handleInbound({ contact: c, text: "hi" });
+  h.advance(2 * DAY);
+  const res = await h.engine.handleIntroduction(intro("e1", [A, B, C]));
+  assert.deepEqual(res.map((r) => r.status), ["queued_paced", "queued_paced", "queued_paced"]);
+  await h.engine.tick();
+  assert.equal(h.sent.length, 1, "one per pass, not all at once");
+  h.advance(15_000);
+  await h.engine.tick();
+  h.advance(15_000);
+  await h.engine.tick();
+  assert.equal(h.sent.length, 3);
+  assert.equal(h.sent[2].at - h.sent[0].at, 30_000);
+});
+
+await test("a longer gap between such texts is honoured when one is set", async () => {
+  const h = harness({ config: { coldIntervalMs: 2 * MIN } });
   await h.engine.handleInbound({ contact: A_E164, text: "hi" });
   await h.engine.handleInbound({ contact: B_E164, text: "hi" });
   h.advance(2 * DAY);
-  const res = await h.engine.handleIntroduction(intro("e1", [A, B]));
-  assert.deepEqual(res.map((r) => r.status), ["queued_paced", "queued_paced"]);
+  await h.engine.handleIntroduction(intro("e1", [A, B]));
   await h.engine.tick();
   assert.equal(h.sent.length, 1);
   h.advance(1 * MIN);
@@ -1129,6 +1144,55 @@ await test("alerts to people quiet for a day are at least 2 minutes apart", asyn
   h.advance(1 * MIN);
   await h.engine.tick();
   assert.equal(h.sent.length, 2);
+});
+
+await test("if LoopMessage says we're over its limit (540), texts drop to its 2-minute pace for an hour", async () => {
+  const h = harness({ reply: (m, n) => (n === 2 ? fail(540) : { ok: true, messageId: `M${n}` }) });
+  for (const c of [A_E164, B_E164, C_E164]) h.engine.handleInbound({ contact: c, text: "hi" });
+  h.advance(2 * DAY);
+  await h.engine.handleIntroduction(intro("e1", [A, B, C]));
+  await h.engine.tick(); // A
+  h.advance(15_000);
+  await h.engine.tick(); // B: refused 540
+  assert.equal(h.engine.stats().slowed_down, true);
+  assert.equal(h.engine.state.outbox.length, 2, "B's alert is kept");
+  h.advance(15_000);
+  await h.engine.tick();
+  assert.equal(h.sent.length, 2, "waits out 2 minutes before trying again");
+  h.advance(105_000); // 2 minutes after the refusal
+  await h.engine.tick(); // B again, accepted
+  assert.equal(alertsIn(h.sent).filter((m) => m.contact === B_E164).length, 2);
+  h.advance(15_000);
+  await h.engine.tick();
+  assert.equal(h.sent.filter((m) => m.contact === C_E164).length, 0, "now 2 minutes apart");
+  h.advance(105_000);
+  await h.engine.tick();
+  assert.equal(h.sent.filter((m) => m.contact === C_E164).length, 1);
+  // An hour on, back to one per pass.
+  h.advance(HOUR);
+  assert.equal(h.engine.stats().slowed_down, false);
+  await h.engine.handleIntroduction(intro("e2", [A, B]));
+  await h.engine.tick();
+  h.advance(15_000);
+  await h.engine.tick();
+  assert.equal(h.sent.filter((m) => entryOf(m) === "e2").length, 2);
+});
+
+await test("a second 540 while already slowed pauses for an hour", async () => {
+  const h = harness({ reply: () => fail(540) });
+  h.engine.handleInbound({ contact: A_E164, text: "hi" });
+  h.advance(2 * DAY);
+  await h.engine.handleIntroduction(intro("e1", [A]));
+  await h.engine.tick(); // refused: slowed
+  h.advance(2 * MIN);
+  await h.engine.tick(); // refused again at the slow pace: a real limit
+  assert.equal(h.sent.length, 2);
+  h.advance(30 * MIN);
+  await h.engine.tick();
+  assert.equal(h.sent.length, 2, "paused for an hour");
+  h.advance(31 * MIN);
+  await h.engine.tick();
+  assert.equal(h.sent.length, 3);
 });
 
 await test("people who messaged recently get alerts at once, no spacing", async () => {
@@ -1140,8 +1204,8 @@ await test("people who messaged recently get alerts at once, no spacing", async 
   assert.equal(h.sent.length, 2);
 });
 
-await test("a welcome and a paced alert are never sent within 2 minutes of each other", async () => {
-  const h = harness();
+await test("a welcome and a paced alert share the gap: never in the same pass, never within it", async () => {
+  const h = harness({ config: { coldIntervalMs: 2 * MIN } });
   h.engine.handleInbound({ contact: A_E164, text: "hi" });
   h.advance(2 * DAY); // A is active but quiet: their alerts are paced
   await h.engine.handleIntroduction(intro("e1", [A, B])); // A paced, B welcomed
@@ -1159,8 +1223,8 @@ await test("a welcome and a paced alert are never sent within 2 minutes of each 
   assert.ok(h.sent[1].at - h.sent[0].at >= 2 * MIN);
 });
 
-await test("a paced alert pushes the next welcome back 2 minutes", async () => {
-  const h = harness();
+await test("a paced alert pushes the next welcome back by the gap", async () => {
+  const h = harness({ config: { coldIntervalMs: 2 * MIN } });
   h.engine.handleInbound({ contact: A_E164, text: "hi" });
   h.advance(2 * DAY);
   await h.engine.handleIntroduction(intro("e1", [A]));
@@ -1232,7 +1296,7 @@ await test("state from the previous version keeps its welcome spacing and duplic
     dedupe: { [`e1:${A_E164}`]: T0 + HOUR }, // the old version texted e1 five hours ago (6h window)
     pacing: { lastInitAt: T0 - MIN, firstInitAt: T0 - 30 * DAY, initDay: utcDay(T0), initCountToday: 1, lastColdAt: null },
   };
-  const h = harness({ store: new MemoryStore(v1) });
+  const h = harness({ store: new MemoryStore(v1), config: { coldIntervalMs: 2 * MIN } });
   await h.engine.handleIntroduction(intro("e2", [A])); // A is quiet: paced
   await h.engine.tick();
   assert.equal(h.sent.length, 0, "the old version's welcome a minute ago still holds the 2-minute spacing");
@@ -1649,8 +1713,9 @@ await test("an introduction that couldn't be saved says so, on either path", asy
   assert.equal(res.saved, true, "a dry run saves nothing, so nothing failed");
 });
 
-await test("a paced send cut off by a restart after a STOP still counts for the 2-minute spacing", async () => {
-  const old = harness({ reply: () => new Promise(() => {}) }); // the process dies inside the send
+await test("a paced send cut off by a restart after a STOP still counts for the spacing", async () => {
+  const config = { coldIntervalMs: 2 * MIN };
+  const old = harness({ config, reply: () => new Promise(() => {}) }); // the process dies inside the send
   old.engine.handleInbound({ contact: A_E164, text: "hi" });
   old.engine.handleInbound({ contact: B_E164, text: "hi" });
   old.advance(2 * DAY);
@@ -1658,7 +1723,7 @@ await test("a paced send cut off by a restart after a STOP still counts for the 
   old.engine.tick(); // A's alert is sent and never returns
   await until(() => old.sent.length === 1);
   old.engine.handleInbound({ contact: A_E164, text: "STOP" }); // removes A's alert, saved
-  const h = harness({ store: new MemoryStore(onDiskNow(old)), start: old.now() });
+  const h = harness({ config, store: new MemoryStore(onDiskNow(old)), start: old.now() });
   await h.engine.tick();
   assert.equal(h.sent.length, 0, "B waits 2 minutes from the cut-off send");
   h.advance(2 * MIN);
@@ -1774,8 +1839,21 @@ await test("welcome refused 520 waits for them to text first, then releases", as
   assert.equal(alertsIn(h.sent).length, 1);
 });
 
-await test("welcome rate-limited (540) pauses an hour and keeps them queued", async () => {
+await test("a welcome refused 540 is tried again after 2 minutes, and they stay queued", async () => {
   const h = harness({ reply: (m, n) => (n === 1 ? fail(540) : { ok: true, messageId: `M${n}` }) });
+  await h.engine.handleIntroduction(intro("e1", [A]));
+  await h.engine.tick();
+  assert.equal(h.engine.state.contacts[A_E164].status, "welcome_queued");
+  h.advance(1 * MIN);
+  await h.engine.tick();
+  assert.equal(h.sent.length, 1);
+  h.advance(1 * MIN);
+  await h.engine.tick();
+  assert.equal(h.engine.state.contacts[A_E164].status, "welcomed");
+});
+
+await test("welcome refused for the plan's limit (550) pauses an hour and keeps them queued", async () => {
+  const h = harness({ reply: (m, n) => (n === 1 ? fail(550) : { ok: true, messageId: `M${n}` }) });
   await h.engine.handleIntroduction(intro("e1", [A]));
   await h.engine.tick();
   assert.equal(h.engine.state.contacts[A_E164].status, "welcome_queued");
@@ -2101,13 +2179,13 @@ await test("nothing LoopMessage reports about a welcome undoes a STOP that came 
 });
 
 await test("a sender-wide refusal pauses everyone even if that person replied during the send", async () => {
-  // A welcome refused 540 while its recipient texts in.
+  // A welcome refused 550 while its recipient texts in.
   const g = gate();
   let h = harness({
     reply: async (m, n) => {
       if (n === 1) {
         await g.promise;
-        return fail(540);
+        return fail(550);
       }
       return { ok: true, messageId: `M${n}` };
     },
@@ -2125,13 +2203,13 @@ await test("a sender-wide refusal pauses everyone even if that person replied du
   await h.engine.tick();
   assert.equal(welcomesIn(h.sent).filter((m) => m.contact === B_E164).length, 1);
 
-  // An alert refused 540 while its recipient opts out.
+  // An alert refused 550 while its recipient opts out.
   const g2 = gate();
   h = harness({
     reply: async (m, n) => {
       if (n === 1) {
         await g2.promise;
-        return fail(540);
+        return fail(550);
       }
       return { ok: true, messageId: `M${n}` };
     },

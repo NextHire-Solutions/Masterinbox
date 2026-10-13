@@ -61,13 +61,15 @@ const TEST_RECIPIENT_OVERRIDE = env.TEST_RECIPIENT_OVERRIDE?.trim() || null;
 const BRAND = env.WELCOME_BRAND?.trim() || "BrokerStaffer";
 const TICK_MS = numberEnv("TICK_SECONDS", 15, { min: 1 }) * 1000;
 
-// LoopMessage's minimums: 15 minutes between new conversations, 2 minutes
-// between messages to people who haven't texted recently. Going below them
-// risks the sender being blocked, so it takes an explicit opt-in (local
+// LoopMessage asks for 15 minutes between new conversations; going below
+// that risks the sender being blocked, so it takes an explicit opt-in (local
 // testing against a mock).
 const FAST_PACING = env.ALLOW_FAST_PACING === "1";
 const INIT_INTERVAL_MINUTES = numberEnv("INIT_INTERVAL_MINUTES", 15, { min: FAST_PACING ? 0 : 15 });
-const COLD_INTERVAL_SECONDS = numberEnv("COLD_SEND_INTERVAL_SECONDS", 120, { min: FAST_PACING ? 0 : 120 });
+// Between texts to opted-in people who haven't texted in the last day.
+// LoopMessage documents 2 minutes; the operator chose one per scheduler pass
+// (Oct 2026). See coldIntervalMs in engine.js, and its fallback on a 540.
+const COLD_INTERVAL_SECONDS = numberEnv("COLD_SEND_INTERVAL_SECONDS", 10);
 
 const missing = [];
 if (!API_KEY) missing.push("LOOPMESSAGE_API_KEY");

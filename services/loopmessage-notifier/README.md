@@ -35,7 +35,7 @@ first message. Instead:
 
 ```
  new number ──lead──▶ alert HELD + welcome queued
-                         │  (15 min apart, 2 min from any other message to
+                         │  (15 min apart, a pass apart from any other message to
                          │   someone who hasn't texted, rolling 24h cap)
                          ▼
                       welcome: "Hi Lara, this is BrokerStaffer. We'll text you
@@ -80,8 +80,21 @@ our message, STOP included; they're read as the reaction and never opt
 anyone out.
 
 Once someone has messaged the sender, LoopMessage allows replies with no
-interval; alerts to people who haven't messaged in the last day are spaced
-**2 minutes** apart, and so are welcomes and those alerts.
+interval. Alerts to people who are opted in but haven't messaged in the last
+day go out **one per scheduler pass, about every 15 seconds**, in one queue
+for everyone; welcomes share that queue.
+
+LoopMessage's docs ask for more: "you must keep a minimal interval of 2
+minutes between each such message. Otherwise, your request may be
+rejected." The 15 seconds is the operator's decision (Oct 2026), on the
+grounds that everyone in that queue has opted in and "recently" isn't
+defined. The fallback is automatic: if LoopMessage answers **540** ("limit
+of sending messages to recipients who have not been contacted for a long
+time"), the service keeps the alert, waits 2 minutes, and sends at the
+2-minute pace for the next hour (`loopmessage_limit_slowing_down` in the
+logs, `slowed_down: true` on `/health`). A second 540 while slowed pauses
+sending for an hour. To go back to 2 minutes for good, set
+`COLD_SEND_INTERVAL_SECONDS=120`.
 
 Held alerts wait **24 hours** for a reply, then they're dropped (stale).
 At most 5 are held per person, one per lead.
@@ -154,11 +167,12 @@ member; the warm-up cap spreads them over days. `/health` shows the
 welcomes sent in the last 24 hours against the cap, and the welcome **reply
 rate** (LoopMessage wants it above ~30%).
 
-Pacing variables (`INIT_INTERVAL_MINUTES`, default 15;
-`COLD_SEND_INTERVAL_SECONDS`, default 120) can't go below LoopMessage's
-minimums; the service refuses to start unless `ALLOW_FAST_PACING=1`, which
-is for local testing against a mock only. `INIT_DAILY_CAP` replaces the
-warm-up schedule.
+Pacing variables: `INIT_INTERVAL_MINUTES` (default 15) can't go below
+LoopMessage's 15 minutes; the service refuses to start unless
+`ALLOW_FAST_PACING=1`, which is for local testing against a mock only.
+`COLD_SEND_INTERVAL_SECONDS` (default 10, which with the 15-second
+scheduler means one text per pass) is the gap described above.
+`INIT_DAILY_CAP` replaces the warm-up schedule.
 
 ## Testing with team members
 
