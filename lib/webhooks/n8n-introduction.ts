@@ -24,11 +24,14 @@
 // notifier. It is only POSTed to for clients with SMS alerts on (the
 // Client Portals page switch), with only the team members whose Team
 // page SMS switch is on, marked approved; see lib/portals/team-sms.ts.
+// The SMS body also carries client.portal_url, the lead's own client's
+// portal link, when that client's portal is live; the alert text shows it.
 // Bison always gets the full team, whatever the SMS settings.
 
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import { chunkedRun } from "@/lib/db/chunked-in";
 import { env } from "@/lib/env";
+import { CLIENT_PORTALS_ENABLED } from "@/lib/portals/flag";
 import { publicPortalUrl } from "@/lib/portals/public-url";
 import { loadSmsRecipients, smsBodyFor } from "@/lib/portals/team-sms";
 
@@ -54,6 +57,7 @@ type ClientEmbed = {
   name: string;
   slug: string | null;
   portal_token: string | null;
+  portal_enabled: boolean | null;
 };
 type RecruiterEmbed = {
   id: string;
@@ -84,6 +88,15 @@ type PipelineRow = {
   assigned_team_member: RecruiterEmbed | RecruiterEmbed[] | null;
   threads: ThreadEmbed | ThreadEmbed[] | null;
 };
+
+// The portal link for the SMS alert: the lead's own client's portal, so
+// the team can open it from the text. Only when that portal is live; a
+// switched-off portal's link would lead nowhere. (Bison's portal_url is
+// built separately and doesn't change.)
+function smsPortalUrl(client: ClientEmbed | null): string | null {
+  if (!CLIENT_PORTALS_ENABLED || client?.portal_enabled !== true) return null;
+  return publicPortalUrl(client.portal_token);
+}
 
 function first<T>(v: T | T[] | null): T | null {
   if (Array.isArray(v)) return v[0] ?? null;
@@ -117,7 +130,7 @@ export async function notifyIntroduction(
       admin
         .from("client_pipeline_entries")
         .select(
-          "id, client_id, stage, lead_name, lead_email, lead_phone, current_brokerage, thread_id, introduced_at, leads:lead_id (company, title, custom_fields), clients:client_id (id, name, slug, portal_token), assigned_team_member:assigned_team_member_id (id, name), threads:thread_id (campaign_name)",
+          "id, client_id, stage, lead_name, lead_email, lead_phone, current_brokerage, thread_id, introduced_at, leads:lead_id (company, title, custom_fields), clients:client_id (id, name, slug, portal_token, portal_enabled), assigned_team_member:assigned_team_member_id (id, name), threads:thread_id (campaign_name)",
         )
         .in("id", slice),
     );
@@ -217,7 +230,11 @@ export async function notifyIntroduction(
         // nobody switched on, or the settings couldn't be read. Bison is
         // never affected.
         if (n8nUrl) {
-          const smsBody = smsBodyFor(n8nPayload, row.client_id, smsRecipients);
+          const smsBody = smsBodyFor(
+            { ...n8nPayload, client: { ...n8nPayload.client, portal_url: smsPortalUrl(client) } },
+            row.client_id,
+            smsRecipients,
+          );
           if (smsBody) {
             targets.push({ label: "n8n", url: n8nUrl, body: smsBody });
           } else {

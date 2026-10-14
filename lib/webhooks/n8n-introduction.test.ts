@@ -20,10 +20,17 @@ import assert from "node:assert/strict";
 import { configureFakeEnvironment, FakePostgrest, type Row } from "../test/fake-postgrest";
 
 configureFakeEnvironment("");
+process.env.CLIENT_PORTALS_ENABLED = "true"; // read at import by lib/portals/flag.ts
 process.env.N8N_INTRODUCTION_WEBHOOK_URL = "http://sms.test/webhooks/introduction";
 process.env.BISON_INTRODUCTION_WEBHOOK_URL = "http://bison.test/api/webhooks/masterinbox";
 
-type Post = { host: string; body: Record<string, unknown> & { team: { name: string; mobile: string }[] } };
+type Post = {
+  host: string;
+  body: Record<string, unknown> & {
+    team: { name: string; mobile: string }[];
+    client: { id: string; name: string | null; portal_url?: string | null };
+  };
+};
 
 const db = new FakePostgrest();
 const posts: Post[] = [];
@@ -50,6 +57,12 @@ const { notifyIntroduction } = await import("./n8n-introduction");
 
 const DEMO = "00ef116c-646d-43b4-a323-680548ea7126";
 const OTHER = "11111111-1111-4111-8111-111111111111";
+const CLOSED = "33333333-3333-4333-8333-333333333333"; // portal switched off
+const PORTALS: Record<string, { portal_token: string | null; portal_enabled: boolean }> = {
+  [DEMO]: { portal_token: "demo-portal-token", portal_enabled: true },
+  [OTHER]: { portal_token: "other-client-token", portal_enabled: true },
+  [CLOSED]: { portal_token: "closed-client-token", portal_enabled: false },
+};
 
 function entry(id: string, clientId: string, clientName: string): Row {
   // FakePostgrest ignores select/embeds, so embedded rows ride inline.
@@ -64,13 +77,13 @@ function entry(id: string, clientId: string, clientName: string): Row {
     thread_id: `thread-${id}`,
     introduced_at: "2026-10-08T00:00:00Z",
     leads: { company: "Legacy Realty Group", title: null, custom_fields: {} },
-    clients: { id: clientId, name: clientName, slug: null, portal_token: null },
+    clients: { id: clientId, name: clientName, slug: null, ...(PORTALS[clientId] ?? { portal_token: null, portal_enabled: true }) },
     assigned_team_member: null,
     threads: { campaign_name: null },
   };
 }
 
-function seed({ demoSmsOn = true, demoSwitches = { Eddy: true, Ryan: false, Amy: true } } = {}) {
+function seed({ demoSmsOn = true, demoSwitches = { Eddy: true, Ryan: false, Amy: true }, othersSmsOn = false } = {}) {
   db.reset();
   posts.length = 0;
   rejectQuery = null;
@@ -80,7 +93,8 @@ function seed({ demoSmsOn = true, demoSwitches = { Eddy: true, Ryan: false, Amy:
       name: "Demo Portal",
       feature_flags: demoSmsOn ? { manage_stages: true, team_sms_notifications: true } : { manage_stages: true },
     },
-    { id: OTHER, name: "Other Client", feature_flags: { manage_stages: true } },
+    { id: OTHER, name: "Other Client", feature_flags: othersSmsOn ? { team_sms_notifications: true } : { manage_stages: true } },
+    { id: CLOSED, name: "Closed Portal Client", feature_flags: othersSmsOn ? { team_sms_notifications: true } : {} },
   ]);
   db.seed("client_team_members", [
     { client_id: DEMO, name: "Eddy", phone: "7184150537", active: true, receives_sms: demoSwitches.Eddy },
@@ -90,8 +104,13 @@ function seed({ demoSmsOn = true, demoSwitches = { Eddy: true, Ryan: false, Amy:
     { client_id: DEMO, name: "No-Phone Nia", phone: null, active: true, receives_sms: true },
     { client_id: OTHER, name: "Olivia", phone: "3105550111", active: true, receives_sms: true },
     { client_id: OTHER, name: "Oscar", phone: "3105550112", active: true, receives_sms: false },
+    { client_id: CLOSED, name: "Cleo", phone: "3105550113", active: true, receives_sms: true },
   ]);
-  db.seed("client_pipeline_entries", [entry("e-demo", DEMO, "Demo Portal"), entry("e-other", OTHER, "Other Client")]);
+  db.seed("client_pipeline_entries", [
+    entry("e-demo", DEMO, "Demo Portal"),
+    entry("e-other", OTHER, "Other Client"),
+    entry("e-closed", CLOSED, "Closed Portal Client"),
+  ]);
 }
 
 const names = (p: Post | undefined) => p?.body.team.map((m) => m.name);
@@ -175,4 +194,32 @@ test("no SMS settings are read when the SMS webhook isn't configured", async () 
   assert.equal(post("sms.test", "e-demo"), undefined);
   assert.equal(db.calls.filter((c) => c.table === "clients").length, 0);
   assert.deepEqual(names(post("bison.test", "e-demo")), ["Eddy", "Ryan", "Amy"]);
+});
+
+test("each SMS carries the portal link of the lead's own client", async () => {
+  seed({ othersSmsOn: true });
+  await notifyIntroduction(["e-demo", "e-other"], "portal_stage_change");
+  assert.equal(post("sms.test", "e-demo")!.body.client.portal_url, "https://portal.brokerstaffer.com/portal/demo-portal-token");
+  assert.equal(post("sms.test", "e-other")!.body.client.portal_url, "https://portal.brokerstaffer.com/portal/other-client-token");
+});
+
+test("no portal link when that client's portal is switched off", async () => {
+  seed({ othersSmsOn: true });
+  await notifyIntroduction(["e-closed"], "portal_stage_change");
+  const sms = post("sms.test", "e-closed")!;
+  assert.deepEqual(names(sms), ["Cleo"], "the text still goes");
+  assert.equal(sms.body.client.portal_url, null);
+});
+
+test("Bison's payload is unchanged by the SMS portal link", async () => {
+  seed({ othersSmsOn: true });
+  await notifyIntroduction(["e-demo", "e-closed"], "inbox_label");
+  const bison = post("bison.test", "e-demo")!.body.client as Record<string, unknown>;
+  assert.deepEqual(Object.keys(bison), ["id", "name", "slug", "portal_url"]);
+  assert.equal(bison.portal_url, "https://portal.brokerstaffer.com/portal/demo-portal-token");
+  // As before: built from the token, whether or not the portal is on.
+  assert.equal(
+    (post("bison.test", "e-closed")!.body.client as Record<string, unknown>).portal_url,
+    "https://portal.brokerstaffer.com/portal/closed-client-token",
+  );
 });
