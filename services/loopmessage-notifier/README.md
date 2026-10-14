@@ -30,8 +30,8 @@ possible to send an outbound text first?"):
   can get the sender **blocked** — which would stop every alert for every
   client.
 
-The lead alert contains the lead's phone number, so it can never be a
-first message. Instead:
+The lead alert contains the lead's phone number and a link to the client's
+portal, so it can never be a first message. Instead:
 
 ```
  new number ──lead──▶ alert HELD + welcome queued
@@ -47,7 +47,8 @@ first message. Instead:
                 ▼                       │
    active: held alerts sent             ▼
    now; future alerts go       opted out: nothing more is sent
-   straight out                (START or YES opts back in)
+   straight out                (START or YES opts back in; after
+                               "wrong number"/"not Eddy", START only)
 
    Anything else ("Who is this?", "Hi", "let me check with my manager",
    "ok, how did you get my number?") is neither: the alerts stay held and the
@@ -56,17 +57,27 @@ first message. Instead:
 ```
 
 **Only a YES-type reply is consent**, as the welcome asks: yes, sure, ok,
-sounds good, thanks, 👍, a Like on the welcome, and similar. A yes mixed
-with doubt ("sure, who is this?") is held. This matters because a Team page
+sounds good, thanks, 👍, a Like on the welcome, and similar. A yes is held
+when the same reply also doubts it: a question about who we are ("sure,
+who's this", "Is this the pharmacy?"), a wrong number or someone else's name
+("ok, wrong number", "Yes, this is Carol"), hesitation ("um ok", "ok…", 🤔),
+sarcasm ("yeah right"), or an auto-reply. After a reply like that, it takes
+a reply that agrees ("yes", "sure", "sounds good", "count me in"); one that
+only acknowledges ("ok thanks", "got it", 👍, a Like) isn't enough. This
+matters because a Team page
 can hold a mistyped or reassigned number: a stranger's reply must never
-release a lead's name and phone. A wrong guess can only hold someone's
-alerts back, and it's logged. In tests with 220 realistic replies from
-strangers at a wrong number, the only ones read as consent were "ok", "k",
-"👍" and "sure lol", which no rule can tell apart from a team member's yes.
+release a lead's name and phone, or the client's portal link. A wrong guess
+can only hold someone's alerts back, and it's logged.
+
+What a stranger can still send that reads as consent: a polite "Thanks",
+"ok" or "Got it", a 👍 or ❤️, or playing along ("sign me up lol"). No rule
+tells those apart from a team member's yes. Accepting only an explicit YES
+would stop most of them, but in the test replies it would also have held
+back 60–70% of team members' yeses, which are mostly "ok", "sure" and 👍.
 
 **Someone who texts the sender first** ("Hi") before any welcome has opted
-in by doing so and is active straight away, unless they refuse or ask who
-we are.
+in by doing so and is active straight away, unless they refuse, ask who we
+are, or the text is an auto-reply or gives someone else's name.
 
 **Opting out, once someone gets alerts, takes a clear request**: STOP,
 UNSUBSCRIBE, CANCEL and the like on their own or with a word or two ("stop
@@ -185,7 +196,8 @@ scheduler means one text per pass) is the gap described above.
    first. They're active immediately and get alerts within seconds.
    Otherwise they'll get the welcome (15 min apart, 2 a day at first) and
    must reply YES (or "sure", "ok", 👍). Any other reply keeps their alerts
-   held.
+   held, and from then on it takes a reply that agrees (yes, sure, sounds
+   good), not just "ok" or 👍.
 4. Fire an Introduction for that client (add a lead in the Introduction
    stage, or move one there). Use a **new lead** each time — the same lead
    isn't re-sent to the same person within 24 hours.
@@ -200,6 +212,8 @@ back).
 |---|---|---|
 | `reply_not_consent` | Someone replied to the welcome, but not with a clear yes. The reply's text is in the line. | If they're on the team, ask them to reply YES. |
 | `possible_opt_out` | Someone getting alerts mentioned stopping without clearly asking. The text is in the line. | Read it; if they want out, ask them to reply STOP. |
+| `active_contact_asks_who` | Someone getting alerts asked who we are ("Who is this?"). The number may have a new owner, who now sees alerts and the portal link. The text is in the line. | Check the number with the client; take it off the Team page if it's no longer theirs. |
+| `inbound_from_opted_out` | Someone who opted out texted again, but not START/YES. The text is in the line, as it is in `contact_opted_out`. | If it's a team member who didn't mean to opt out ("wait, I want these"), ask them to reply START. |
 | `inbound_from_email_contact` | A reply came from an Apple ID email, which can't be matched to a phone. Error level if it reads as an opt-out. | Opt them out by hand if so. |
 | `alert_send_unconfirmed`, `welcome_send_unconfirmed`, `*_send_interrupted` | LoopMessage may or may not have sent it; it won't be sent again. | Check with the person if it matters. |
 | `alert_not_delivered`, `welcome_not_delivered` | LoopMessage reported it undelivered. | Usually nothing; repeated ones point at the number. |
@@ -241,6 +255,25 @@ back).
   received have finished (up to ~20s). Requests are still accepted
   meanwhile; they're on disk before they're answered, so the next process
   picks up whatever this one doesn't finish.
+- **Portal link.** Each alert ends with the portal of the client the lead
+  belongs to, as Masterinbox sends it (`client.portal_url`, present when
+  that client's portal is on):
+
+  ```
+  Hi Eddy, you have a new agent in the Introduction stage.
+
+  Agent: Laura Wilson
+  Phone: (665) 234-1234
+  Brokerage: Legacy Realty Group
+
+  Portal: https://portal.brokerstaffer.com/portal/<token>
+  ```
+
+  The link opens the client's whole portal, so only a link to that host is
+  ever put in a text; anything else in the field is dropped and the alert
+  goes out without one. An alert that's held or queued keeps the link it
+  arrived with. Links are left out of reply text in the logs, since a
+  reaction can quote an alert.
 - **Opt-out footer.** LoopMessage appends `To opt-out reply: stop` to at
   least some US messages; the service can't remove it. The alert carries
   no opt-out line of its own, so it isn't said twice (the welcome still

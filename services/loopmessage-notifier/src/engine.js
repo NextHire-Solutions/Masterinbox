@@ -140,9 +140,11 @@ function stageOf(c) {
   return "first_contact";
 }
 
-// Reply text for logs: enough to judge it, not a whole essay.
+// Reply text for logs: enough to judge it, not a whole essay. Links are
+// left out: a reaction can quote an alert, and its portal link opens the
+// client's whole portal.
 function excerpt(text) {
-  const s = String(text ?? "").replace(/\s+/g, " ").trim();
+  const s = String(text ?? "").replace(/https?:\/\/\S+/gi, "[link]").replace(/\s+/g, " ").trim();
   return s.length > 160 ? `${s.slice(0, 157)}...` : s;
 }
 
@@ -160,6 +162,7 @@ function alertCopy(alert) {
     name: alert.name ?? null,
     passthrough: alert.passthrough,
     at: alert.at,
+    portalUrl: alert.portalUrl ?? null,
     ...(alert.attempts ? { attempts: alert.attempts } : {}),
   };
 }
@@ -579,6 +582,8 @@ export class Engine {
       name: r.name ?? null,
       passthrough,
       at: now,
+      // The lead's own client's portal, shown in the alert.
+      portalUrl: plan.portalUrl ?? null,
     };
 
     if (TERMINAL.has(c.status)) {
@@ -636,9 +641,10 @@ export class Engine {
   // change also applies to alerts that were held or queued before it.
   renderAlert(c, alert) {
     const name = alert.name ?? c.name ?? null;
-    if (alert.lead) return buildText(name, alert.lead);
+    const opts = { portalUrl: alert.portalUrl ?? null };
+    if (alert.lead) return buildText(name, alert.lead, opts);
     const legacy = leadFromLegacyAlertText(alert.text);
-    return legacy ? buildText(name, legacy) : alert.text;
+    return legacy ? buildText(name, legacy, opts) : alert.text;
   }
 
   async sendAlert(c, alert) {
@@ -832,12 +838,18 @@ export class Engine {
     const c = this.ensureContact(contact, {}, now);
     const before = c.status;
     c.lastInboundAt = now;
-    const { action, reason, mentionsStop } = interpretReply(text, { name: c.name, stage: stageOf(c) });
+    const { action, reason, mentionsStop, asksWho } = interpretReply(text, {
+      name: c.name,
+      stage: stageOf(c),
+      // After a doubtful reply, it takes a reply that agrees (see interpretReply).
+      strict: Boolean(c.consentDoubted),
+      wrongPerson: c.status === "opted_out" && c.optOutReason === "wrong_number",
+    });
     const done = (release) => ({ contact, before, status: c.status, action, release });
     const who = { contact, team_member: c.name ?? null };
 
     if (action === "opt_out") {
-      if (c.status !== "opted_out") this.markOptedOut(c, now, reason === "stop" ? "replied_stop" : reason);
+      if (c.status !== "opted_out") this.markOptedOut(c, now, reason === "stop" ? "replied_stop" : reason, text);
       return done(false);
     }
     if (action === "reply") {
@@ -845,23 +857,31 @@ export class Engine {
       // for them can go now. A reply that talks about stopping without
       // asking to is left for a person to judge.
       if (mentionsStop) this.log("warn", "possible_opt_out", { ...who, text: excerpt(text) });
+      // Someone getting alerts asking who we are may be a new owner of the
+      // number; a person should look.
+      if (asksWho) this.log("warn", "active_contact_asks_who", { ...who, text: excerpt(text) });
       return done(true);
     }
     if (action === "hold") {
       if (c.status === "opted_out") {
-        this.log("info", "inbound_from_opted_out", who);
+        // With the text, so a member who didn't mean to opt out ("wait no,
+        // I want these") can be seen and asked to reply START.
+        this.log("warn", "inbound_from_opted_out", { ...who, text: excerpt(text) });
       } else {
         // Not a clear yes: their alerts stay held. Logged with the text so
-        // someone can follow up.
+        // someone can follow up. From now on only an explicit yes counts.
+        c.consentDoubted = true;
         this.log("warn", "reply_not_consent", { ...who, contact_status: c.status, text: excerpt(text) });
       }
       return done(false);
     }
 
     // consent, or resume after an opt-out
+    c.consentDoubted = false;
     c.status = "active";
     c.activatedAt = now;
     c.optedOutAt = null;
+    c.optOutReason = null;
     c.welcomeAttempts = 0;
     c.inboundRefusals = 0;
     this.unqueueWelcome(contact);
@@ -1297,10 +1317,11 @@ export class Engine {
     return mine;
   }
 
-  markOptedOut(c, now, reason) {
+  markOptedOut(c, now, reason, text) {
     const dropped = (c.held?.length ?? 0) + this.takeOutbox(c.contact).length;
     c.status = "opted_out";
     c.optedOutAt = now;
+    c.optOutReason = reason ?? null;
     c.held = [];
     this.unqueueWelcome(c.contact);
     this.log("warn", "contact_opted_out", {
@@ -1308,6 +1329,7 @@ export class Engine {
       team_member: c.name ?? null,
       reason,
       dropped_alerts: dropped,
+      ...(text !== undefined ? { text: excerpt(text) } : {}),
     });
   }
 

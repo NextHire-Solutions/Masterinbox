@@ -214,15 +214,28 @@ function withoutQuotes(raw) {
   return raw.replace(DOUBLE_QUOTED, " ").replace(SINGLE_QUOTED, "$1 ");
 }
 
+// A reply that is nothing but a short quote is their own answer in quotes:
+// "YES", 'stop', “Yes please”. Anything else quoted is someone else's words.
+const SOLE_QUOTE = /^(?:“([^“”]*)”|"([^"]*)"|'([^']*)'|‘([^‘’]*)’|«([^«»]*)»)$/;
+
+function unquotedOf(raw) {
+  const m = raw.trim().match(SOLE_QUOTE);
+  const inner = m ? m.slice(1).find((x) => x !== undefined) : null;
+  return inner !== null && inner !== undefined && tokenize(inner).length <= 3 ? inner : withoutQuotes(raw);
+}
+
 // iPhone tapbacks sent as SMS text: 'Liked “…”', 'Reacted 👍 to “…”',
 // 'Le gustó “…”'. Read on the accent-stripped, lowercased text.
 const REACTION = /^\s*(liked|loved|le gusto|le encanto|laughed at|emphasi[sz]ed|disliked|questioned)\s+[“"'«„]/;
 const REACTED = /^\s*reacted\s+(\S{1,20})\s+to\s+[“"'«„]/;
 const REMOVED_REACTION = /^\s*removed\s+an?\s+\S{1,20}\s+from\s+[“"'«„]/;
 
-const POSITIVE_EMOJI = /[\u{1F197}\u{1F64B}\u{1F44D}\u{1F44C}\u{2705}\u{2714}\u{1F64F}\u{1F60A}\u{1F642}\u{263A}\u{1F600}\u{1F603}\u{1F604}\u{1F601}\u{1F44F}\u{1F4AF}\u{2764}\u{2665}\u{1F64C}\u{1F91D}\u{1F525}\u{1F4AA}\u{1F919}\u{1FAE1}\u{1F973}\u{1F389}\u{1F60E}\u{1F44A}\u{270C}\u{1F929}\u{1F60D}\u{1F970}\u{1F499}\u{1F49A}\u{1F49C}\u{1F9E1}\u{1F49B}]/u;
+const POSITIVE_EMOJI = /[\u{1F197}\u{1F64B}\u{1F44D}\u{1F44C}\u{2705}\u{2714}\u{1F64F}\u{1F60A}\u{1F642}\u{263A}\u{1F600}\u{1F603}\u{1F604}\u{1F601}\u{1F44F}\u{1F4AF}\u{2764}\u{2665}\u{1F64C}\u{1F91D}\u{1F525}\u{1F4AA}\u{1F919}\u{1FAE1}\u{1F973}\u{1F389}\u{1F60E}\u{1F44A}\u{1F929}\u{1F60D}\u{1F970}\u{1F499}\u{1F49A}\u{1F49C}\u{1F9E1}\u{1F49B}]/u;
 const NEGATIVE_EMOJI = /[\u{1F44E}\u{274C}\u{1F645}\u{1F621}\u{1F92C}\u{1F595}\u{1F620}\u{26D4}\u{1F6AB}\u{1F6D1}]/u;
-const STOP_EMOJI = /^[\s\u{1F6D1}\u{26D4}\u{1F6AB}\u{FE0F}]+$/u; // 🛑 ⛔ 🚫 on their own
+// 🛑 ⛔ 🚫 on their own; at least one of them, so a blank reply isn't one.
+const STOP_EMOJI = /^[\s\u{FE0F}]*[\u{1F6D1}\u{26D4}\u{1F6AB}][\s\u{1F6D1}\u{26D4}\u{1F6AB}\u{FE0F}]*$/u;
+// Doubt, not refusal: 🙄 🤔 ❓ ❔ 😕 🤨 😒 🧐 😐 😑 🤷 🫤 😬. Never consent with one.
+const DOUBT_EMOJI = /[\u{1F644}\u{1F914}\u{2753}\u{2754}\u{1F615}\u{1F928}\u{1F612}\u{1F9D0}\u{1F610}\u{1F611}\u{1F937}\u{1FAE4}\u{1F62C}]/u;
 
 function parseReaction(raw) {
   const s = normalizeText(raw);
@@ -380,7 +393,8 @@ const YES_PHRASES = [
   ["i", "am", "in"], ["im", "down"], ["yes", "please"], ["please", "do"], ["go", "ahead"], ["go", "for", "it"],
   ["no", "problem"], ["not", "a", "problem"], ["no", "worries"], ["no", "prob"], ["no", "probs"], ["no", "problemo"],
   ["no", "sweat"], ["no", "doubt"], ["no", "brainer"], ["no", "complaints"], ["why", "not"], ["will", "do"],
-  ["got", "it"], ["all", "good"], ["thats", "fine"], ["that", "is", "fine"], ["fine", "by", "me"], ["works", "for", "me"],
+  ["got", "it"], ["you", "got", "it"], ["you", "bet"], ["you", "betcha"], ["all", "good"], ["thats", "fine"],
+  ["that", "is", "fine"], ["fine", "by", "me"], ["works", "for", "me"],
   ["that", "works"], ["love", "it"], ["love", "this"], ["love", "that"], ["lets", "do", "it"], ["lets", "go"],
   ["keep", "them", "coming"], ["keep", "em", "coming"], ["send", "them", "over"], ["send", "them"], ["send", "em"],
   ["send", "away"], ["happy", "to", "get", "these"], ["happy", "to", "receive", "these"], ["glad", "to", "get", "these"],
@@ -392,13 +406,14 @@ const YES_PHRASES = [
   ["keep", "me", "posted"], ["keep", "me", "in", "the", "loop"], ["please", "proceed"], ["please", "enroll", "me"],
   ["enroll", "me"], ["i", "consent"], ["i", "accept"], ["i", "agree"], ["i", "am", "agree"], ["am", "agree"], ["i", "confirm"],
   ["i", "would", "like", "that"], ["i", "would", "like", "to", "receive", "these"], ["i", "would", "appreciate"],
+  ["id", "like", "that"], ["id", "like", "these"], ["id", "love", "that"],
   ["that", "would", "be", "great"], ["would", "be", "great"], ["very", "well"], ["this", "is", "great"],
   ["thats", "great"], ["that", "is", "great"], ["thats", "me"], ["say", "less"], ["hell", "yeah"], ["heck", "yeah"],
   ["is", "ok", "for", "me"], ["is", "ok"], ["is", "fine"], ["esta", "bien"], ["de", "acuerdo"], ["claro", "que", "si"],
   ["si", "por", "favor"], ["sounds", "good", "to", "me"], ["fine", "with", "me"],
 ];
 const YES_FILLERS = new Set([
-  "please", "thanks", "thank", "you", "so", "much", "very", "a", "lot", "again", "it", "lol", "haha", "just", "really",
+  "please", "thanks", "thank", "so", "much", "very", "a", "lot", "again", "it", "lol", "haha", "just", "really",
   "and", "sir", "maam", "gracias", "muchas", "man", "dude", "bro", "guys", "then", "too", "also", "for", "the", "heads",
   "up", "info", "here", "now", "absolutely", "definitely", "kindly", "dokie", "lmao", "to", "getting", "receiving",
   "receive", "these", "them", "alerts", "messages", "texts", "text", "por", "favor", "that",
@@ -406,14 +421,14 @@ const YES_FILLERS = new Set([
 // Opening sentences that greet or introduce, before the answer: "Hi!",
 // "Good morning", "Eddy here", "This is Eddy".
 const GREETING = new Set([
-  "hi", "hey", "hello", "yo", "good", "morning", "afternoon", "evening", "there", "oh", "ah", "ahh", "um", "uh", "well",
+  "hi", "hey", "hello", "yo", "good", "morning", "afternoon", "evening", "there", "oh", "ah", "ahh", "well",
   "lol", "haha", "hehe", "hiya", "howdy", "this", "is", "its", "it", "here", "im", "i", "am", "sir", "maam", "hola",
   "buenos", "dias", "buenas", "tardes",
 ]);
 // Words that open a sentence without being its answer: "Oh ok", "Hi, yes
 // please", "Good morning yes". (Not "I'm": "I'm good" is a polite no.)
 const INTERJECTIONS = new Set([
-  "hi", "hey", "hello", "yo", "oh", "ah", "ahh", "um", "uh", "well", "lol", "lmao", "haha", "hehe", "hiya", "howdy",
+  "hi", "hey", "hello", "yo", "oh", "ah", "ahh", "well", "lol", "lmao", "haha", "hehe", "hiya", "howdy",
   "hola", "good", "morning", "afternoon", "evening", "there", "sir", "maam",
 ]);
 // After the yes, these mean it isn't one yet: "but", "if", "first",
@@ -423,15 +438,61 @@ const DOUBT = new Set([
   "although", "however", "unless", "except", "if", "first", "later", "maybe", "perhaps", "wait", "before", "until",
   "unsure", "idk", "hmm", "eh", "scam", "spam", "wrong", "stop", "unsubscribe", "optout", "cancel", "quit", "pause",
   "block", "report", "remove", "let", "yet", "think", "check", "ask", "takemeoff", "nomore",
+  // who we are, or someone else's phone
+  "who", "whos", "whose", "whom", "whoever", "his", "him", "her", "hers", "wife", "husband", "son", "daughter", "mom",
+  "dad", "mother", "father", "brother", "sister", "kid", "left", "retired", "retire", "former", "formerly", "used",
+  "havent", "hasnt", "ion", "tf", "wtf", "wdym", "wym", "bye", "lose",
+  // sarcasm and playing along
+  "whatever", "jk", "cap", "boomer", "stranger", "strangers", "bot", "legit", "guess", "pigs", "knock", "play", "junk",
+  "um", "umm", "uh", "uhh", "erm",
+  // other languages: but, who, you
+  "pero", "quien", "quienes", "quem", "voce", "sino",
 ]);
-const QUESTION_OPENERS = new Set(["who", "whos", "why", "how", "what", "whats", "where", "which"]);
+// Any form of these: "blocking", "reported", "thinking", "scammer"...
+const DOUBT_STEMS = [
+  "block", "report", "think", "thought", "check", "stop", "cancel", "remov", "paus", "unsub", "spam", "scam", "wrong",
+  "mistak", "incorrect", "confus", "weird", "strange", "random", "suspic", "sketch", "fake", "fraud", "phish", "robot",
+  "creep", "doubt", "equivoc", "hmm",
+];
+const DOUBT_PHRASES = [
+  ["pass", "it", "on"], ["pass", "it", "along"], ["let", "him", "know"], ["let", "her", "know"], ["tell", "him"],
+  ["tell", "her"], ["seems", "legit"], ["cool", "story"], ["yeah", "right"], ["ya", "right"], ["yea", "right"],
+];
+// An answering machine or a business line, not a person agreeing.
+const AUTO_REPLY = [
+  ["we", "got", "your", "message"], ["we", "received", "your", "message"], ["will", "reply", "as", "soon"],
+  ["will", "get", "back", "to", "you"], ["get", "back", "to", "you", "as", "soon"], ["out", "of", "office"],
+  ["out", "of", "the", "office"], ["auto", "reply"], ["autoreply"], ["automated", "message"], ["automated", "reply"],
+  ["automatic", "reply"], ["currently", "unavailable"], ["our", "business", "hours"], ["outside", "business", "hours"],
+  ["outside", "of", "business", "hours"], ["our", "office", "hours"], ["thank", "you", "for", "contacting"],
+  ["thanks", "for", "contacting"], ["thank", "you", "for", "your", "message"], ["thanks", "for", "your", "message"],
+  ["driving", "focus"], ["do", "not", "disturb"], ["see", "your", "message", "when"], ["this", "is", "an", "automated"],
+  ["not", "monitored"], ["will", "be", "in", "touch"], ["will", "text", "you", "back"], ["will", "reply", "shortly"],
+  ["will", "respond", "shortly"], ["member", "of", "our", "team"], ["team", "member", "will"],
+];
+
+function isDoubtWord(w) {
+  return DOUBT.has(w) || DOUBT_STEMS.some((st) => w.startsWith(st)) || /[谁错]/u.test(w);
+}
+
+function autoReply(words) {
+  return AUTO_REPLY.some((p) => hasPhraseIn(words, p));
+}
+
+const QUESTION_OPENERS = new Set(["who", "whos", "why", "how", "what", "whats", "where", "whered", "which"]);
 // In a question after the yes, these mean it's about who we are, not about
 // the alerts: "Ok. And you are?", "Sure, how did you get my number?". A
 // question about the alerts ("Yes! Do these come in real time?") is fine.
 const DOUBTFUL_QUESTION = new Set([
-  "you", "your", "yours", "who", "whos", "whom", "why", "scam", "spam", "legit", "bot", "number", "sign",
-  "signed", "know", "huh", "wym",
+  "you", "your", "yours", "youre", "who", "whos", "whom", "why", "scam", "spam", "legit", "bot", "number", "sign",
+  "signed", "know", "huh", "wym", "ai", "quien", "quem", "voce", "sino",
 ]);
+// A question opening like this is about who we are: "Is this the pharmacy?",
+// "Are you a bot?", "Have we met?", "And this is?".
+const DOUBTFUL_OPENINGS = [
+  ["is", "this"], ["are", "you"], ["have", "we"], ["do", "you"], ["did", "you"], ["did", "i"], ["and", "you"],
+  ["and", "this"], ["and", "who"], ["you", "are"],
+];
 // "Yeah no", "sure not", "ok no thanks": the yes is taken back.
 const TAKEN_BACK = new Set(["no", "nah", "not", "nope", "never"]);
 // Harmless phrases that contain doubt words: "let me know", "can't wait".
@@ -447,15 +508,26 @@ function isYesSentence(words) {
   return cover(words, yesShape) > 0;
 }
 
+// Saying who they are, when it isn't a team member: "I'm a plumber", "I'm 15".
+const TEAM_WORDS = new Set([
+  "agent", "realtor", "broker", "member", "assistant", "admin", "manager", "team", "recruiter", "coordinator", "office",
+]);
+
 function hedges(words) {
   // "Who…", "Why…", or "What…"/"How…" about us rather than the alerts.
   if (IDENTITY_QUESTIONS.some((p) => hasPhraseIn(words, p))) return true;
   if (QUESTION_OPENERS.has(words[0]) && words.some((w) => DOUBTFUL_QUESTION.has(w))) return true;
+  if (autoReply(words)) return true;
+  const selfDescribed =
+    (hasPhraseIn(words.slice(0, 2), ["im", "a"]) || hasPhraseIn(words.slice(0, 2), ["im", "an"]) ||
+      hasPhraseIn(words.slice(0, 3), ["i", "am", "a"]) || (words[0] === "im" && /^\d+$/.test(words[1] ?? ""))) &&
+    !words.some((w) => TEAM_WORDS.has(w));
+  if (selfDescribed) return true;
   let rest = words;
   for (const p of NOT_DOUBT) {
     for (const i of starts(rest, p).reverse()) rest = [...rest.slice(0, i), ...rest.slice(i + p.length)];
   }
-  return rest.some((w) => DOUBT.has(w));
+  return rest.some(isDoubtWord) || DOUBT_PHRASES.some((p) => hasPhraseIn(rest, p));
 }
 
 function firstNameOf(name) {
@@ -476,7 +548,8 @@ function answerOf(clauses, name) {
   if (i >= clauses.length) return null;
   const whole = clauses[i];
   let s = 0;
-  while (s < whole.length - 1 && INTERJECTIONS.has(whole[s]) && !isYesSentence(whole.slice(s))) s++; // "oh ok", "hi yes please"
+  // "oh ok", "hi yes please"; a few at most, so "lol lol lol..." stays fast.
+  while (s < Math.min(whole.length - 1, 6) && INTERJECTIONS.has(whole[s]) && !isYesSentence(whole.slice(s))) s++;
   return { first: whole.slice(s), whole, rest: clauses.slice(i + 1) };
 }
 
@@ -485,29 +558,142 @@ function questionsIn(raw) {
   return (raw.match(/[^.!?\n]*\?+/g) ?? []).map(tokenize).filter((q) => q.length > 0);
 }
 
-function doubtfulQuestion(q) {
-  return (
-    q.some((w) => DOUBTFUL_QUESTION.has(w) || DOUBT.has(w)) ||
-    IDENTITY_QUESTIONS.some((p) => hasPhraseIn(q, p))
+const WHAT = new Set(["what", "whats", "wut", "wat", "huh", "who"]);
+const BARE_WHAT = new Set([
+  "sorry", "excuse", "pardon", "me", "im", "i", "am", "is", "say", "wait", "um", "uh", "eh", "hm", "hmm", "lol", "ok",
+  "okay", "so", "and", "but", "the", "hell", "heck",
+]);
+
+function doubtfulQuestion(q, own) {
+  if (DOUBTFUL_OPENINGS.some((p) => p.every((w, j) => q[j] === w))) return true;
+  // "Sorry, what?", "Wait what?": nothing in it but the "what".
+  if (q.length <= 3 && q.some((w) => WHAT.has(w)) && q.every((w) => WHAT.has(w) || BARE_WHAT.has(w))) return true;
+  if (own && q.some((w) => w === own || w === `${own}s`)) return true; // "Got the right Eddy?"
+  return q.some((w) => DOUBTFUL_QUESTION.has(w) || isDoubtWord(w)) || IDENTITY_QUESTIONS.some((p) => hasPhraseIn(q, p));
+}
+
+// Introduces someone other than the person we greeted: "Yes, this is Carol",
+// "My name is Mike", "soy María". Only capitalised names after "this is /
+// it's / I'm / soy", so "this is great" isn't one; any word after "my name
+// is".
+const NOT_A_NAME = new Set([
+  "good", "great", "fine", "sure", "ready", "happy", "glad", "excited", "interested", "not", "so", "very", "really", "in",
+  "down", "okay", "ok", "all", "here", "the", "a", "an", "just", "still", "also", "new", "on", "with", "from", "part",
+  "going", "gonna", "definitely", "absolutely", "totally", "super", "thrilled", "available", "busy", "out", "back",
+  "off", "done", "set", "yes", "no", "me", "it", "awesome", "perfect", "cool", "amazing", "correct", "right",
+]);
+
+// The name we greeted, or a short or long form of it: Ed, Eddie, Edward
+// for Eddy; Liz for Elizabeth; Trish for Patricia.
+function sameName(a, b) {
+  if (a === b || a === `${b}s` || b === `${a}s`) return true;
+  if (a.length >= 2 && b.length >= 2 && a.slice(0, 2) === b.slice(0, 2)) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  return short.length >= 3 && long.includes(short.slice(0, 3));
+}
+
+function namesSomeoneElse(raw, name) {
+  const own = firstNameOf(name);
+  if (!own) return false;
+  const text = String(raw).replace(/[’‘`´]/g, "'");
+  const plain = (w) => tokenize(w)[0] ?? "";
+  const other = (w) => {
+    const x = plain(w);
+    return Boolean(x) && !sameName(x, own) && !NOT_A_NAME.has(x);
+  };
+  for (const m of text.matchAll(/\b(?:[Tt]his is(?: actually)?|[Ii]t'?s|[Ii]t is|I'?m|i'?m|I am|i am|[Ss]oy)\s+(\p{Lu}[\p{L}]+)/gu)) {
+    if (other(m[1])) return true;
+  }
+  for (const m of text.matchAll(/\b(?:my name is|my name's|me llamo)\s+(\p{L}+)/giu)) {
+    if (other(m[1])) return true;
+  }
+  return false;
+}
+
+// Speaks of the person we greeted as someone else: "I'll tell Eddy", "I'll
+// let Eddy know", "I'll pass it to Eddy".
+function passesItOn(words, own) {
+  if (!own) return false;
+  return words.some(
+    (w, i) =>
+      (w === own || w === `${own}s`) &&
+      (words[i - 1] === "tell" ||
+        (words[i - 1] === "let" && words[i + 1] === "know") ||
+        (words[i - 1] === "to" && words[i - 2] === "it" && ["pass", "give", "forward", "send"].includes(words[i - 3]))),
   );
 }
 
-// Is the answer a yes, and does anything after it hedge?
+// Their own name in scare quotes: 'Sure "Eddy" lol'. Not a quote of our
+// welcome, which starts "Hi Eddy".
+function quotesTheirName(raw, name) {
+  const own = firstNameOf(name);
+  if (!own) return false;
+  return (String(raw).match(DOUBLE_QUOTED) ?? []).some((q) => {
+    const words = tokenize(q);
+    return words.length <= 3 && words.includes(own);
+  });
+}
+
+// The yes is itself asked: "Yes? How can I help?", "Um ok? I'm confused".
+const YES_QUESTIONED = /^[^\p{L}\p{N}]*[\p{L}' ]{1,25}\?/u;
+
+// Taking an answer in isn't agreeing: after "Who is this?", "ok thanks" or
+// "got it" just acknowledges; "sure", "sounds good", "yes", "sí" agree.
+const ACK_UNITS = new Set([
+  "ok", "k", "kk", "alright", "aight", "ight", "perfect", "great", "awesome", "cool", "nice", "amazing", "excellent",
+  "fantastic", "wonderful", "sweet", "word", "done", "roger", "copy", "noted", "gotcha", "np", "thanks", "ty", "gracias",
+  "appreciated", "good", "perfecto",
+]);
+const ACK_PHRASES = [
+  ["no", "problem"], ["not", "a", "problem"], ["no", "worries"], ["no", "prob"], ["no", "probs"], ["no", "problemo"],
+  ["no", "sweat"], ["will", "do"], ["got", "it"], ["all", "good"], ["10", "4"], ["roger", "that"], ["copy", "that"],
+  ["thank", "you", "for", "reaching", "out"], ["thank", "you"], ["appreciate", "it"], ["thats", "great"],
+  ["that", "is", "great"], ["this", "is", "great"], ["thats", "me"],
+];
+
+function agrees(words) {
+  for (let i = 0; i < words.length; ) {
+    const p = YES_PHRASES.find((ph) => ph.every((x, j) => words[i + j] === x));
+    if (p) {
+      if (!ACK_PHRASES.some((a) => a.length === p.length && a.every((x, j) => x === p[j]))) return true;
+      i += p.length;
+    } else {
+      if (YES_UNITS.has(words[i]) && !ACK_UNITS.has(words[i])) return true;
+      i++;
+    }
+  }
+  return false;
+}
+
+// Is the answer a yes, and does anything after it hedge? `strong`: some
+// sentence of it agrees (see agrees), not only acknowledges.
+
 function readYes(clauses, raw, name) {
-  if (clauses.length === 0) return { opener: false, consent: POSITIVE_EMOJI.test(raw) && !NEGATIVE_EMOJI.test(raw) };
+  const unsure = NEGATIVE_EMOJI.test(raw) || DOUBT_EMOJI.test(raw);
+  if (clauses.length === 0) {
+    return { opener: false, consent: POSITIVE_EMOJI.test(raw) && !unsure, strong: false };
+  }
   const answer = answerOf(clauses, name);
-  if (!answer || !isYesSentence(answer.first)) return { opener: false, consent: false };
+  if (!answer || !isYesSentence(answer.first)) return { opener: false, consent: false, strong: false };
   const rest = answer.rest;
+  const own = firstNameOf(name);
   // "Yes?", "Ok??", "Sure, really?": the answer itself is a question.
   const asked =
     raw.includes("?") &&
-    (clauses.flat().length <= 3 || raw.includes("??") || (/^[^.!]*\?/.test(raw.trim()) && answer.rest.length === 0));
+    (clauses.flat().length <= 3 ||
+      raw.includes("??") ||
+      YES_QUESTIONED.test(raw) ||
+      (/^[^.!]*\?/.test(raw.trim()) && rest.length === 0));
   const doubtful =
     asked ||
-    questionsIn(raw).some(doubtfulQuestion) ||
-    NEGATIVE_EMOJI.test(raw) ||
+    unsure ||
+    raw.includes("...") || // "ok…", "Ok then..." (rawOf turns … into ...)
+    questionsIn(raw).some((q) => doubtfulQuestion(q, own)) ||
+    namesSomeoneElse(raw, name) ||
+    passesItOn(clauses.flat(), own) ||
     rest.some((c) => !isYesSentence(c) && hedges(c));
-  return { opener: true, consent: !doubtful };
+  const strong = [answer.first, ...rest.filter(isYesSentence)].some(agrees);
+  return { opener: true, consent: !doubtful, strong };
 }
 
 // --- REFUSALS --------------------------------------------------------------
@@ -519,7 +705,8 @@ const DECLINE_PHRASES = [
   ["definitely", "not"], ["no", "way"], ["not", "for", "me"], ["id", "rather", "not"], ["rather", "not"],
   ["please", "dont"], ["no", "need"], ["not", "needed"], ["yeah", "nah"], ["yeah", "no"], ["claro", "que", "no"],
   ["i", "dont", "think", "so"], ["dont", "think", "so"], ["i", "dont", "want", "these"], ["dont", "want", "these"],
-  ["i", "do", "not", "want", "these"], ["not", "me"],
+  ["i", "do", "not", "want", "these"], ["not", "me"], ["count", "me", "out"], ["estoy", "bien"], ["no", "gracias"],
+  ["im", "okay"], ["i", "am", "okay"], ["im", "ok"],
 ];
 const DECLINE_UNITS = new Set(["no", "nope", "nah", "naw", "nay", "n", "nty", "pass"]);
 const DECLINE_FILLERS = new Set([
@@ -535,6 +722,8 @@ const WRONG_PHRASES = [
   ["not", "meant", "for", "me"], ["isnt", "meant", "for", "me"], ["not", "who", "you"], ["dont", "know", "you"],
   ["do", "not", "know", "you"], ["dont", "know", "who"], ["never", "heard", "of"], ["no", "idea", "who"],
   ["ion", "know"], ["meant", "to", "text", "someone"], ["typed", "the", "number"],
+  ["used", "to", "have", "this", "number"], ["just", "got", "this", "number"], ["had", "this", "number"],
+  ["new", "to", "this", "number"], ["numero", "equivocado"], ["numero", "equivocada"],
 ];
 // First names that are everyday words: too risky to read as a name.
 const COMMON_WORD_NAMES = new Set([
@@ -584,6 +773,7 @@ function refusalOf(clauses, raw, name) {
     return "wrong_number";
   }
   if (all.includes("incorrect") || WRONG_PHRASES.some((p) => hasPhraseIn(all, p))) return "wrong_number";
+  if (all.some((w) => w.startsWith("equivoc") || /错/u.test(w))) return "wrong_number"; // Spanish, Chinese
   if (deniesName(all, name)) return "wrong_number";
   // A decline is a sentence of its own, not "no idea what this is" or "no
   // need to call me, text is fine"; and not followed by "not yet" or "let
@@ -597,8 +787,18 @@ function refusalOf(clauses, raw, name) {
   ) {
     return "declined";
   }
+  // A polite no after a thanks: "Thanks, I'm good", "Thank you, I'll pass".
+  if (answer && answer.rest.some((c) => cover(c, declineShape) > 0) && !raw.includes("?")) return "declined";
   if (callsItSpam(all, raw)) return "declined";
   return null;
+}
+
+// Shaped like a no, even with a question mark that keeps it from being a
+// refusal: "I'm not interested?", "No thanks?". Never consent.
+function soundsLikeNo(clauses, name) {
+  const answer = answerOf(clauses, name);
+  if (!answer) return false;
+  return [answer.whole, answer.first, ...answer.rest].some((c) => cover(c, declineShape) > 0);
 }
 
 function hasPhraseIn(words, phrase) {
@@ -617,11 +817,15 @@ const IDENTITY_QUESTIONS = [
   ["what", "company"], ["what", "brokerage"], ["when", "did", "i", "sign"], ["didnt", "sign", "up"],
   ["never", "signed", "up"], ["did", "i", "sign", "up"], ["is", "this", "spam"], ["is", "this", "a", "scam"], ["wym"],
   ["what", "are", "these"], ["what", "is", "it"], ["for", "what"], ["and", "you", "are"],
+  ["whats", "brokerstaffer"], ["which", "brokerage"], ["which", "company"], ["whered", "you", "get"],
+  ["what", "this", "is"], ["wats", "this"], ["wat", "is", "this"], ["con", "quien", "hablo"], ["quien", "es"],
+  ["quien", "eres"], ["que", "es", "esto"], ["que", "es", "eso"], ["de", "donde"],
 ];
 
 function asksWhoWeAre(clauses, raw) {
   const all = clauses.flat();
   if (IDENTITY_QUESTIONS.some((p) => hasPhraseIn(all, p))) return true;
+  if (all.some((w) => /谁/u.test(w))) return true; // Chinese "who"
   if (raw.includes("??")) return true;
   if (raw.includes("?") && all.length <= 2) return true; // "Who?", "Yes?", "Huh?"
   return all.length <= 3 && all.some((w) => ["who", "whos", "huh", "what", "wut", "wat"].includes(w));
@@ -629,31 +833,45 @@ function asksWhoWeAre(clauses, raw) {
 
 // --- Putting it together ---------------------------------------------------
 
+// Full-width forms (？ ， ＳＴＯＰ) read as ASCII, ⁉ ⁈ ‽ ﹖ as "?", and … as
+// "...". Not full NFKC, which turns ™ into "TM" and so a word.
+function rawOf(text) {
+  return String(text ?? "")
+    .slice(0, MAX_READ)
+    .replace(/[\uFF01-\uFF5E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/[\u2048\u2049\u203D\uFE56]/g, "?")
+    .replace(/\u3000/g, " ")
+    .replace(/\u2026/g, "...");
+}
+
 /**
  * What a reply says, independent of who sent it.
- * @returns {{ reaction: string|null, stop: boolean, yes: boolean, opener: boolean,
- *   refusal: "declined"|"wrong_number"|null, question: boolean, empty: boolean,
+ * @returns {{ reaction: string|null, stop: boolean, yes: boolean, strong: boolean, opener: boolean,
+ *   refusal: "declined"|"wrong_number"|null, question: boolean, empty: boolean, odd: boolean, declines: boolean,
  *   mentionsStop: boolean }}
  */
 export function readReply(text, { name = null } = {}) {
-  const raw = String(text ?? "").slice(0, MAX_READ);
+  const raw = rawOf(text);
   const reaction = parseReaction(raw);
   if (reaction) {
     return {
       reaction,
       stop: false,
       yes: reaction === "positive",
+      strong: false,
       opener: reaction === "positive",
       refusal: reaction === "negative" ? "declined" : null,
       question: reaction === "question",
       empty: false,
+      odd: false,
+      declines: reaction === "negative",
       mentionsStop: false,
     };
   }
-  const unquoted = withoutQuotes(raw);
+  const unquoted = unquotedOf(raw);
   const clauses = clausesOf(unquoted);
   const stop = isStopRequest(clauses, unquoted);
-  const { opener, consent } = readYes(clauses, unquoted, name);
+  const { opener, consent, strong } = readYes(clauses, unquoted, name);
   // A yes somewhere in it ("Don't know who set this up but sure") makes a
   // refusal a mixed reply: held for a person, not opted out.
   const all = clauses.flat();
@@ -662,7 +880,8 @@ export function readReply(text, { name = null } = {}) {
   return {
     reaction: null,
     stop,
-    yes: consent,
+    yes: consent && !quotesTheirName(raw, name),
+    strong,
     // A whole-sentence "no" ("Yeah I don't think so", "Ok no thanks") stays
     // a refusal whatever filler it starts with.
     opener: opener || (saysYes && refusal !== "declined"),
@@ -670,6 +889,9 @@ export function readReply(text, { name = null } = {}) {
     question: asksWhoWeAre(clauses, unquoted),
     // No words and nothing affirmative: an attachment, "...", "🤔".
     empty: clauses.length === 0 && !POSITIVE_EMOJI.test(raw),
+    declines: soundsLikeNo(clauses, name),
+    // An auto-reply, someone else's name, or their name in scare quotes.
+    odd: autoReply(clauses.flat()) || namesSomeoneElse(unquoted, name) || quotesTheirName(raw, name),
     mentionsStop: !stop && clauses.some((c) => c.some((w) => STOP_MENTIONS.has(w)) || hasPhraseIn(c, ["dont", "text"]) || hasPhraseIn(c, ["turn", "off"])),
   };
 }
@@ -688,38 +910,48 @@ const resumeShape = { phrases: [["opt", "in"], ["sign", "me", "up"], ["sign", "u
  * @returns {{ action: "opt_out"|"consent"|"resume"|"hold"|"reply",
  *   reason: string|null, mentionsStop: boolean }}
  */
-export function interpretReply(text, { name = null, stage }) {
+export function interpretReply(text, { name = null, stage, strict = false, wrongPerson = false }) {
   const r = readReply(text, { name });
-  const out = (action, reason = null) => ({ action, reason, mentionsStop: r.mentionsStop });
+  const out = (action, reason = null) => ({ action, reason, mentionsStop: r.mentionsStop, asksWho: r.question });
 
   if (stage === "active") {
     if (r.stop) return out("opt_out", "stop");
     // A reassigned number: "Wrong number, there's no Eddy here", "this
     // isn't Eddy anymore, he changed numbers". Only with the number itself
     // mentioned, and only a real denial of the name.
-    const words = clausesOf(withoutQuotes(String(text ?? "").slice(0, MAX_READ))).flat();
+    const words = clausesOf(unquotedOf(rawOf(text))).flat();
     const aboutTheNumber = ["number", "numbers", "phone", "anymore", "changed", "longer"].some((w) => words.includes(w));
     if (r.refusal === "wrong_number" && aboutTheNumber && deniesName(words, name)) return out("opt_out", "wrong_number");
     return out("reply");
   }
   if (stage === "opted_out") {
     if (r.stop || r.question || r.reaction) return out("hold");
-    const raw = withoutQuotes(String(text ?? "").slice(0, MAX_READ));
+    const raw = unquotedOf(rawOf(text));
     const words = clausesOf(raw).flat();
+    // Opted out as the wrong person ("wrong number, no Eddy here"): a "yes"
+    // from them later isn't Eddy agreeing; only the START keyword resumes.
+    if (wrongPerson) {
+      const keyword = words.some((w) => w === "start" || w === "unstop");
+      return keyword && words.every((w) => ["start", "unstop", "please", "again"].includes(w)) ? out("resume") : out("hold");
+    }
     return !raw.includes("?") && cover(words, resumeShape) > 0 ? out("resume") : out("hold");
   }
 
   if (r.stop) return out("opt_out", "stop");
   if (r.reaction) {
     if (r.reaction === "negative") return out("opt_out", "declined");
-    return r.reaction === "positive" && stage === "welcome" ? out("consent") : out("hold");
+    return r.reaction === "positive" && stage === "welcome" && !strict ? out("consent") : out("hold");
   }
   if (r.refusal && !r.opener) return out("opt_out", r.refusal);
+  // `strict`: they've already sent a doubtful reply ("Who is this?"), so a
+  // later "ok thanks" isn't enough; it takes a reply that agrees.
+  if (strict && !(r.yes && r.strong)) return out("hold");
   if (stage === "first_contact") {
     // They texted us first: that's opting in, unless they're asking who we
-    // are or sent nothing readable.
-    return r.question || r.refusal || r.empty ? out("hold") : out("consent");
+    // are, sent nothing readable, or something doesn't fit.
+    return r.question || r.refusal || r.declines || r.empty || r.odd ? out("hold") : out("consent");
   }
-  // After the welcome: only a clear yes, with nothing hedging it.
-  return r.yes ? out("consent") : out("hold");
+  // After the welcome: only a clear yes, with nothing hedging it, that
+  // isn't also a wrong number or a question about who we are.
+  return r.yes && !r.refusal && !r.question ? out("consent") : out("hold");
 }

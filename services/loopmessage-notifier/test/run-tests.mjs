@@ -19,6 +19,7 @@ import {
   isSafeInitialText,
   parseClientList,
   planNotifications,
+  portalLinkOf,
   processIntroduction,
 } from "../src/notify.js";
 import { sendMessage } from "../src/loopmessage.js";
@@ -293,6 +294,17 @@ await test("wrong event and missing entry id are rejected", () => {
   assert.equal(planNotifications("string").ok, false);
 });
 
+await test("the plan carries the portal link Masterinbox sent for the lead's client", () => {
+  const link = "https://portal.brokerstaffer.com/portal/douglas-elliman-q9";
+  const plan = planNotifications({ ...PINNED, client: { ...PINNED.client, portal_url: link } });
+  assert.equal(plan.portalUrl, link);
+  assert.ok(plan.recipients.every((r) => r.text.endsWith(`Portal: ${link}`)));
+  assert.equal(planNotifications(PINNED).portalUrl, null, "no link sent, none shown");
+  const forged = planNotifications({ ...PINNED, client: { ...PINNED.client, portal_url: "https://evil.example/x" } });
+  assert.equal(forged.portalUrl, null);
+  assert.ok(!forged.recipients[0].text.includes("evil"));
+});
+
 await test("empty team is valid but plans nothing", () => {
   const plan = planNotifications({ ...PINNED, team: [] });
   assert.equal(plan.ok, true);
@@ -317,6 +329,49 @@ await test("alert text is exactly the client's approved example", () => {
       "Phone: (665) 234-1234\n" +
       "Brokerage: Legacy Realty Group",
   );
+});
+
+await test("the alert ends with the lead's client's portal link, when there is one", () => {
+  assert.equal(
+    buildText("Eddy", { name: "Aisha Patel", phone: "6823900953", company: "Sotheby's International Realty" }, {
+      portalUrl: "https://portal.brokerstaffer.com/portal/demo-portal-x7k2",
+    }),
+    "Hi Eddy, you have a new agent in the Introduction stage.\n\n" +
+      "Agent: Aisha Patel\n" +
+      "Phone: (682) 390-0953\n" +
+      "Brokerage: Sotheby's International Realty\n\n" +
+      "Portal: https://portal.brokerstaffer.com/portal/demo-portal-x7k2",
+  );
+  assert.equal(buildText("Eddy", { name: "Jo" }, { portalUrl: null }), "Hi Eddy, you have a new agent in the Introduction stage.\n\nAgent: Jo");
+});
+
+await test("only a link to the client portal host is ever put in a text", () => {
+  const ok = "https://portal.brokerstaffer.com/portal/demo-portal-x7k2";
+  assert.equal(portalLinkOf({ portal_url: ok }), ok);
+  assert.equal(portalLinkOf({ portal_url: `  ${ok} ` }), ok);
+  // a token set by hand on the Client Portals page: letters, digits, - and _
+  const custom = "https://portal.brokerstaffer.com/portal/Grant_Team-2026";
+  assert.equal(portalLinkOf({ portal_url: custom }), custom);
+  for (const bad of [
+    "https://evil.example/?https://portal.brokerstaffer.com/portal/abcd",
+    "https://portal-brokerstaffer.com/portal/abcd",
+    `https://portal.brokerstaffer.com/portal/${"a".repeat(121)}`,
+    "http://portal.brokerstaffer.com/portal/demo-portal-x7k2",
+    "https://evil.example.com/portal/demo-portal-x7k2",
+    "https://portal.brokerstaffer.com.evil.example/portal/abc123",
+    "https://portal.brokerstaffer.com/portal/demo/../admin",
+    "https://portal.brokerstaffer.com/portal/demo-portal-x7k2?next=https://evil.example",
+    "https://portal.brokerstaffer.com/portal/",
+    "https://portal.brokerstaffer.com/settings",
+    "javascript:alert(1)",
+    "",
+    null,
+    42,
+  ]) {
+    assert.equal(portalLinkOf({ portal_url: bad }), null, String(bad));
+  }
+  assert.equal(portalLinkOf(null), null);
+  assert.equal(portalLinkOf({}), null);
 });
 
 await test("the alert greets by first name and never includes the email", () => {
@@ -657,7 +712,7 @@ await test("after the welcome, a reply that is a yes starts alerts", () => {
     "Please do", "Keep them coming!", "No problem", "No worries", "No doubt!", "Not a problem", "np", "Thanks!",
     "Thank you so much", "Appreciate it", "Good", "Gotcha 👍", "Noted", "10-4", "Opt in", "That’s fine",
     "I'm good with that", "Sí, gracias", "👍", "👍🏽", "✅", "🙏", "🔥", "Oh ok, thanks", "Hi! Yes please",
-    "Good morning! Yes please", "Eddy here, yes please", "Yes please! Excited to see who’s coming in",
+    "Good morning! Yes please", "Eddy here, yes please", "Yes, this is Eddy", "Sí, soy yo",
     "No complaints here, send them over", "Yes. Let me know if I need to do anything",
     `Liked “${WELCOME}”`, `Loved “${WELCOME}”`,
     // other ways of saying it
@@ -665,10 +720,13 @@ await test("after the welcome, a reply that is a yes starts alerts", () => {
     "Hell yeah", "Keep me in the loop!", "Dale, gracias!", "De acuerdo", "Está bien", "Claro que sí", "Siii",
     "I consent to receiving these messages.", "Good afternoon. I confirm that I would like to receive these alerts.",
     "Thank you for reaching out. Yes, please enroll me.", "That would be great, thank you.", "I am agree", "🆗",
-    "Hey! Yep that's me, go ahead and send them over",
+    "Hey! Yep that's me, go ahead and send them over", "Yes! I'm a realtor on Dana's team", "Yes, I'm Excited!",
+    "You got it", "You bet!", "Oh ok, thanks", "Yes please! What time?", `Yes. “${WELCOME}”`, "Ｙｅｓ",
     // a yes, then a question about the alerts themselves
     "Yes! Do these come in real time or once a day?", "Yep! What time do they usually come in?",
-    "Yes please. Is there a way to get them by email too?",
+    "Yes please. Is there a way to get them by email too?", "Yes! Is it every agent or just mine?",
+    "Yes. Do these come 24/7 or business hours?",
+    "Yes please. Do we all get these?",
   ]) {
     assert.equal(act(t, "welcome"), "consent", t);
   }
@@ -693,6 +751,8 @@ await test("after the welcome, anything less than a clean yes keeps the alerts h
     "Are you sure you have the right number?", "Not so sure about this", "Why would I reply yes to a random number?",
     "I'm sure you mean well but no", "Let me check with Dana first", "Maybe later", "Not yet", "Huh, neat. Sure",
     "No idea what this is lol", "No, not yet — let me talk to my broker first",
+    // the cost of reading any "who" as doubt: this one is held for a follow-up
+    "Yes please! Excited to see who’s coming in",
   ]) {
     assert.notEqual(act(t, "welcome"), "consent", JSON.stringify(t));
   }
@@ -710,6 +770,165 @@ await test("after the welcome, anything less than a clean yes keeps the alerts h
   }
 });
 
+await test("a yes in the same reply as a wrong number or a question about us isn't consent", () => {
+  for (const t of [
+    // the wrong person, or someone else's phone
+    "Ok, wrong number", "Thanks, but wrong number", "Sure, but I'm not Eddy", "Ok, you have the wrong person",
+    "Yes, I just got this number", "Ok I used to have this number", "Yes, this is Carol", "Thanks! My name is Mike",
+    "Sure, I'll tell him", "Ok I'll pass it on", "Yes but this is his wife", "Sure \"Eddy\" lol", "Ok, número equivocado",
+    "Ok, Eddy left the company",
+    // asking who we are, without a question mark, or in another language
+    "Sure, who's this", "Ok whos sending these", "Sí, ¿quién es?", "好的，你是谁？", "Ok? I'm confused", "Yes? How can I help?",
+    "Sure. Is this the pharmacy?", "Ok. Got the right Eddy?", "Yes. Sorry, what?", "Thanks. And this is?",
+    // doubt, sarcasm, or not a person at all
+    "Ok…", "Sure...", "Yes 🙄", "Ok 🤔", "👍🤔", "👍?", "Ok ⁉️", "Ok whatever", "Yeah right", "Sure, seems legit", "Cool story",
+    "Good for you", "Love that for you", "Yes I'm a plumber", "Sure, I'm 15", "Yes, blocking you now", "Ok, reported",
+    "Thank you for your message. We will get back to you as soon as possible.",
+    "Thanks for contacting Smith Realty! Our office hours are 9-5.",
+    "I'm driving with Driving Focus turned on. I'll see your message when I get where I'm going.",
+    // a polite no after a thanks
+    "Thanks, I'm good", "Thank you, I'll pass", "Thanks but I'm ok",
+    // hesitation, junk, a wave goodbye
+    "um ok", "Uh sure", "Ummm ok", "Yes. Um, sure", "Great, more junk texts", "✌️",
+    // any form of a doubt word, and phrases that play along
+    "Sure, I'm thinking about it", "Ok, sounds sketchy", "Yes, nice phishing attempt", "Ok. I'll pass it on",
+    "Thanks. Cool story bro", "Thanks! We got your message and will reply as soon as possible.",
+    "Yes please. Sorry, what?", "Ok. Excuse me, what?", "Ok sure. What is “BrokerStaffer”?",
+    "Yes please keep them coming thanks?",
+  ]) {
+    assert.notEqual(act(t, "welcome"), "consent", JSON.stringify(t));
+  }
+});
+
+await test("a reply that texts us first isn't consent if it's an auto-reply or names someone else", () => {
+  for (const t of ["Thanks for contacting us, we will reply as soon as possible", "Hi, this is Carol", "My name is Mike", "你是谁？", "你好，请问你是谁"]) {
+    assert.equal(act(t, "first_contact"), "hold", t);
+  }
+  assert.equal(act("Hi, this is Eddy", "first_contact"), "consent");
+});
+
+await test("after a doubtful reply, it takes a reply that agrees, not one that acknowledges", () => {
+  const strict = (text) => interpretReply(text, { name: "Eddy Grant", stage: "welcome", strict: true }).action;
+  for (const t of [
+    "yes", "Yes please", "Yeah", "Yep, send them", "Sign me up", "Opt in", "Sure", "Sounds good", "Oh ok. Yes",
+    "Got it — count me in", "Ah ok, please do", "Sí", "Ok, claro", "Dale", "100%", "Of course! Send them",
+    "Ok cool, I’d like that",
+  ]) {
+    assert.equal(strict(t), "consent", t);
+  }
+  for (const t of [
+    "ok", "Ah ok, thanks", "Thanks!", "👍", "Got it, thanks", "Noted", "Will do", "Ok np", "Ok gracias", `Liked “${WELCOME}”`,
+  ]) {
+    assert.equal(strict(t), "hold", t);
+  }
+  assert.equal(strict("STOP"), "opt_out");
+});
+
+await test("Spanish and Chinese wrong-number replies to the welcome opt out", () => {
+  for (const t of ["打错了", "Número equivocado"]) assert.equal(act(t, "welcome"), "opt_out", t);
+});
+
+await test("a first text shaped like a no is never consent, even with a question mark", () => {
+  for (const t of ["I’m not interested？", "Not interested, thanks？", "No thanks?"]) {
+    assert.notEqual(act(t, "first_contact"), "consent", t);
+  }
+  assert.equal(act("Hey it’s Eddy, any alerts for me yet?", "first_contact"), "consent");
+});
+
+await test("a long run of filler is read quickly", () => {
+  const started = process.hrtime.bigint();
+  interpretReply("lol ".repeat(500), { name: "Eddy Grant", stage: "welcome" });
+  assert.ok(Number(process.hrtime.bigint() - started) / 1e6 < 60, "under 60 ms");
+});
+
+await test("an opt-out from a reply, and a later text from them, are logged with the text", () => {
+  const logs = captureLogs();
+  const h = harness({ logger: logs.logger });
+  h.engine.handleInbound({ contact: A_E164, text: "hi" });
+  h.engine.handleInbound({ contact: A_E164, text: "Stop" });
+  assert.equal(logs.lines.find((l) => l.msg === "contact_opted_out")?.text, "Stop");
+  h.engine.handleInbound({ contact: A_E164, text: "Wait no, I want these" });
+  const later = logs.lines.find((l) => l.msg === "inbound_from_opted_out");
+  assert.equal(later?.level, "warn");
+  assert.equal(later?.text, "Wait no, I want these");
+});
+
+await test("'blocked' and 'reported' are usually about the lead: they don't opt anyone out", () => {
+  for (const t of ["Blocked", "Blocked me lol", "Blocked?", "Number blocked", "Already blocked", "Reported 👍", "Reported"]) {
+    assert.equal(act(t, "active"), "reply", t);
+  }
+  assert.notEqual(act("Blocked", "welcome"), "consent");
+});
+
+await test("a blank reply is nothing; a reply that's only a short quote is their own answer", () => {
+  for (const t of [" ", "  \n ", "\u200b"]) {
+    assert.notEqual(act(t, "welcome"), "opt_out", JSON.stringify(t));
+    assert.equal(act(t, "active"), "reply", JSON.stringify(t));
+  }
+  assert.equal(act(`"YES"`, "welcome"), "consent");
+  assert.equal(act("“Yes please”", "welcome"), "consent");
+  assert.equal(act(`"STOP"`, "active"), "opt_out");
+  assert.equal(act("'stop'", "active"), "opt_out");
+  // a longer quote is still someone else's words
+  assert.equal(act(`she said "stop texting me" lol`, "active"), "reply");
+  assert.equal(act(`"Please stop texting me now"`, "active"), "reply");
+});
+
+await test("'who is this?' from someone getting alerts is logged for a person, links left out", async () => {
+  const logs = captureLogs();
+  const h = harness({ logger: logs.logger });
+  h.engine.handleInbound({ contact: A_E164, text: "hi" });
+  const out = h.engine.handleInbound({ contact: A_E164, text: "Who is this?" });
+  assert.equal(out.status, "active");
+  assert.equal(logs.lines.find((l) => l.msg === "active_contact_asks_who")?.text, "Who is this?");
+  // a reaction quoting an alert keeps its portal link out of the log
+  h.engine.handleInbound({ contact: A_E164, text: "STOP" });
+  h.engine.handleInbound({
+    contact: A_E164,
+    text: "Questioned “Hi Eddy, you have a new agent in the Introduction stage.\n\nAgent: Jo Smith\n\nPortal: https://portal.brokerstaffer.com/portal/exr-4f9a1c2b7d”",
+  });
+  const logged = JSON.stringify(logs.lines);
+  assert.ok(!logged.includes("exr-4f9a1c2b7d"), "no portal token in the logs");
+  assert.ok(logged.includes("[link]"));
+});
+
+await test("after a wrong-person opt-out, a later 'yes' doesn't resume them; START does", async () => {
+  const h = harness();
+  await h.engine.handleIntroduction(intro("e1", [A]));
+  await h.engine.tick();
+  h.engine.handleInbound({ contact: A_E164, text: "Wrong number, there's no Eddy here" });
+  assert.equal(h.engine.state.contacts[A_E164].status, "opted_out");
+  assert.equal(h.engine.state.contacts[A_E164].optOutReason, "wrong_number");
+  for (const t of ["yes", "Yes please", "ok"]) {
+    assert.equal(h.engine.handleInbound({ contact: A_E164, text: t }).status, "opted_out", t);
+  }
+  assert.equal(h.engine.handleInbound({ contact: A_E164, text: "Start please" }).status, "active");
+  assert.equal(h.engine.state.contacts[A_E164].optOutReason, null);
+  // an ordinary STOP still comes back with a yes, as the welcome says
+  h.engine.handleInbound({ contact: A_E164, text: "STOP" });
+  assert.equal(h.engine.handleInbound({ contact: A_E164, text: "yes" }).status, "active");
+});
+
+await test("a reply that speaks of the person we greeted as someone else isn't consent", () => {
+  for (const t of ["Sure, I’ll tell Eddy", "I’ll let Eddy know", "Ok I'll pass it to Eddy"]) assert.equal(act(t, "welcome"), "hold", t);
+  assert.notEqual(act("Who’s Eddy?", "welcome"), "consent");
+  for (const t of [
+    "Got it! A member of our team will be in touch shortly.", "Sure thing! A team member will text you back shortly.",
+    "Thanks! Someone will be in touch soon.",
+  ]) {
+    assert.notEqual(act(t, "welcome"), "consent", t);
+  }
+  assert.equal(act("Ok cool, I’d like that", "welcome"), "consent");
+  assert.equal(act("Yes - also send to eddy.grant@grantteamhomes.com", "welcome"), "consent");
+});
+
+await test("a nickname of the person we greeted isn't someone else", () => {
+  for (const [t, name] of [["Yes, it's Ed", "Edward Grant"], ["Sí, soy Alex", "Alejandro Ruiz"], ["Yes, it's Trish. Thanks!", "Patricia Gomez"], ["Yes, this is Eddie", "Eddy Grant"]]) {
+    assert.equal(act(t, "welcome", name), "consent", t);
+  }
+  assert.notEqual(act("Yes, this is Carol", "welcome"), "consent");
+});
+
 await test("after the welcome, refusals opt out", () => {
   for (const t of [
     "STOP", "stop.", "Stop please", "UNSUBSCRIBE", "end", "Cancel", "please stop", "Opt-out", "No", "Nope", "nah",
@@ -720,7 +939,7 @@ await test("after the welcome, refusals opt out", () => {
     "Never text me again", "Quit texting me", "Unsub", "unsubcribe", "Stopp", "👎", "🛑", `Disliked “${WELCOME}”`,
     "Hell no", "Absolutely not", "I'll pass", "This is spam", "Yes, stop", "Please don't", "Hi! No thanks",
     "Yes, I want to opt out", "Ok, I'd like to opt out please", "Yes please remove me", "Sure, remove me", "I’m good, thanks",
-    "Yes take me off", "Cool, how do I unsubscribe?",
+    "Yes take me off", "Cool, how do I unsubscribe?", "Uh, stop",
   ]) {
     assert.equal(act(t, "welcome"), "opt_out", t);
   }
@@ -921,7 +1140,7 @@ await test("refusals of the welcome opt out: nothing held is ever sent", async (
   }
 });
 
-await test("'who is this?' isn't consent: alerts stay held until a real reply", async () => {
+await test("'who is this?' isn't consent: alerts stay held until an explicit yes", async () => {
   const logs = captureLogs();
   const h = harness({ logger: logs.logger });
   await h.engine.handleIntroduction(intro("e1", [A]));
@@ -933,9 +1152,15 @@ await test("'who is this?' isn't consent: alerts stay held until a real reply", 
   const held = logs.lines.find((l) => l.msg === "reply_not_consent");
   assert.equal(held.text, "Who is this?", "logged with the text, for someone to follow up");
   assert.equal(h.engine.state.contacts[A_E164].held.length, 1);
+  // After a doubtful reply an "ok" isn't enough: the welcome asked for YES.
   h.engine.handleInbound({ contact: A_E164, text: "ah ok, thanks" });
   await h.engine.idle();
+  assert.equal(alertsIn(h.sent).length, 0);
+  assert.equal(h.engine.state.contacts[A_E164].status, "welcomed");
+  h.engine.handleInbound({ contact: A_E164, text: "Yes please" });
+  await h.engine.idle();
   assert.equal(alertsIn(h.sent).length, 1);
+  assert.equal(h.engine.state.contacts[A_E164].consentDoubted, false);
 });
 
 await test("a 'no' from someone already getting alerts is just a reply", () => {
@@ -1391,6 +1616,36 @@ await test("a held alert older than a day is dropped, not sent late", async () =
   await h.engine.idle();
   assert.equal(alertsIn(h.sent).length, 0);
   assert.equal(h.engine.state.contacts[A_E164].status, "active");
+});
+
+await test("each alert carries its own client's portal link, held or queued, across a restart", async () => {
+  const DEMO_LINK = "https://portal.brokerstaffer.com/portal/demo-portal-x7k2";
+  const OTHER_LINK = "https://portal.brokerstaffer.com/portal/raintown-realty-m3";
+  const withLink = (entryId, team, client, link) =>
+    planNotifications({
+      event: "lead.introduction", source: "portal_add_lead", pipeline_entry_id: entryId, sms_enabled: true,
+      lead: PINNED.lead, client: { ...client, portal_url: link }, team,
+    });
+  const h = harness();
+  // A is new: both leads are held until A replies; the service restarts meanwhile.
+  await h.engine.handleIntroduction(withLink("demo-lead", [A], { id: "c-demo", name: "Demo Portal" }, DEMO_LINK));
+  await h.engine.handleIntroduction(withLink("rain-lead", [A], { id: "c-rain", name: "Raintown Realty" }, OTHER_LINK));
+  await h.engine.tick(); // welcome
+  const welcome = welcomesIn(h.sent)[0].text;
+  assert.ok(!welcome.includes("http"), "never a link in a first message");
+  const e = h.restart();
+  e.handleInbound({ contact: A_E164, text: "yes" });
+  await e.idle();
+  const byLead = Object.fromEntries(alertsIn(h.sent).map((m) => [entryOf(m), m.text]));
+  assert.ok(byLead["demo-lead"].endsWith(`Portal: ${DEMO_LINK}`));
+  assert.ok(byLead["rain-lead"].endsWith(`Portal: ${OTHER_LINK}`));
+  // B is opted in but quiet: the alert waits in the paced queue and keeps its link.
+  e.handleInbound({ contact: B_E164, text: "hi" });
+  h.advance(2 * DAY);
+  await e.handleIntroduction(withLink("rain-2", [B], { id: "c-rain", name: "Raintown Realty" }, OTHER_LINK));
+  const again = h.restart();
+  await again.tick();
+  assert.ok(h.sent.at(-1).text.endsWith(`Portal: ${OTHER_LINK}`));
 });
 
 await test("an alert held under the old wording goes out in the new wording", async () => {

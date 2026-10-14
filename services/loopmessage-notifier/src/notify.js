@@ -56,14 +56,17 @@ export function formatLeadPhone(raw) {
 // Fields that are empty upstream are omitted rather than rendered as
 // "null"; portal-added leads often have no phone or company.
 //
-// It contains the lead's phone number, which LoopMessage forbids in a FIRST
-// message, so it is only ever sent to someone who has already messaged the
-// sender (the engine guarantees that).
+// It contains the lead's phone number, and with `portalUrl` a link, both of
+// which LoopMessage forbids in a FIRST message, so it is only ever sent to
+// someone who has already messaged the sender (the engine guarantees that).
 //
 // No opt-out line of our own: LoopMessage appends "To opt-out reply: stop"
 // itself, and with ours the alert said it twice (client, Oct 2026). STOP
 // works whether or not the line is shown.
-export function buildText(teamMemberName, lead = {}) {
+//
+// `portalUrl` is the portal of the client the lead belongs to (Oct 2026),
+// from Masterinbox; see portalLinkOf.
+export function buildText(teamMemberName, lead = {}, { portalUrl = null } = {}) {
   const first = firstNameOf(teamMemberName) || "there";
   const details = [];
   if (lead.name) details.push(`Agent: ${lead.name}`);
@@ -73,7 +76,20 @@ export function buildText(teamMemberName, lead = {}) {
   return [
     `Hi ${first}, you have a new agent in the Introduction stage.`,
     ...(details.length > 0 ? ["", ...details] : []),
+    ...(portalUrl ? ["", `Portal: ${portalUrl}`] : []),
   ].join("\n");
+}
+
+// The client portal link Masterinbox sends with an Introduction
+// (client.portal_url), when that client's portal is live. Only a link to
+// the brokerage-facing portal host is ever put in a text: the link opens
+// the client's whole portal, so nothing else that arrives in the field is
+// passed on. Tokens are what Masterinbox allows: letters, digits, - and _.
+const PORTAL_LINK = /^https:\/\/portal\.brokerstaffer\.com\/portal\/[A-Za-z0-9_-]{4,120}$/;
+
+export function portalLinkOf(client) {
+  const url = typeof client?.portal_url === "string" ? client.portal_url.trim() : "";
+  return PORTAL_LINK.test(url) ? url : null;
 }
 
 // LoopMessage (helpdesk "send-first"): "An initial message must never
@@ -163,12 +179,14 @@ export function planNotifications(
   const lead = payload.lead ?? {};
   const client = payload.client ?? {};
 
+  const portalUrl = portalLinkOf(client);
   const base = {
     ok: true,
     entryId,
     clientId: client?.id ?? null,
     clientName: client?.name ?? null,
     source: payload.source ?? null,
+    portalUrl,
   };
 
   // Masterinbox marks every Introduction it approves for SMS: the client has
@@ -206,7 +224,7 @@ export function planNotifications(
           name,
           mobile: testRecipientOverride,
           contact: normalized.e164,
-          text: buildText(name, lead),
+          text: buildText(name, lead, { portalUrl }),
           lead: alertLead(lead),
         },
       ],
@@ -236,7 +254,7 @@ export function planNotifications(
       name,
       mobile: member?.mobile ?? null,
       contact: normalized.e164,
-      text: buildText(name, lead),
+      text: buildText(name, lead, { portalUrl }),
       lead: alertLead(lead),
     });
   }
