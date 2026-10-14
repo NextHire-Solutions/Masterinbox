@@ -82,6 +82,16 @@ export class FakePostgrest {
   private matches(row: Row, query: URLSearchParams): boolean {
     for (const [k, v] of query) {
       if (["select", "order", "limit", "offset", "on_conflict", "columns"].includes(k)) continue;
+      if (k === "or") {
+        // `or=(claimed_at.is.null,claimed_at.lt.<iso>)` — any one condition. Flat lists only.
+        const parts = v.replace(/^\(|\)$/g, "").split(",");
+        const any = parts.some((p) => {
+          const dot = p.indexOf(".");
+          return this.matches(row, new URLSearchParams([[p.slice(0, dot), p.slice(dot + 1)]]));
+        });
+        if (!any) return false;
+        continue;
+      }
       const cell = row[k];
       const str = cell === null || cell === undefined ? null : String(cell);
       if (v.startsWith("eq.")) {

@@ -7,6 +7,7 @@
  * change the other. There is no shared package between the two deployments.
  */
 import { INTRO_ROW_COLUMNS, introClientFromRow, routeIntro } from "@/lib/inbox/intro-macro";
+import { introSenderFor, introSignOffName } from "@/lib/inbox/intro-sender";
 import { rosterRowForPortal } from "@/lib/clients/roster-for-portal";
 import { createDraftForAgent, loadAgentWithKey, loadAgents, type ReplyAgent } from "./agent";
 import { labelLeftToAPerson, selectAgentForThread, type SelectableAgent } from "./agent-config";
@@ -90,6 +91,12 @@ export interface RunAgentInput {
    * `ourName` so the drafting prompt for ordinary replies is unchanged.
    */
   senderName: string | null;
+  /**
+   * What `{{sender.name}}` becomes in the HANDOVER (14 Oct): the name on the
+   * mailbox the introduction goes out from — Nicole's, when send-transport
+   * will send it from hers (introSignOffName). Absent: senderName.
+   */
+  introSenderName?: string | null;
   subject: string | null;
   /** Full thread, oldest → newest, exactly as createDraftForAgent wants it. */
   conversation: ConversationTurn[];
@@ -219,6 +226,28 @@ function asQualificationState(state: StoredThreadState | null): QualificationSta
   return state ? { status: state.status, step: state.step, answers: state.answers } : EMPTY_STATE;
 }
 
+/**
+ * What the handover's macro is filled from — the runtime's and the release
+ * sweep's, so the two cannot drift. `{{sender.name}}` is the name on the
+ * mailbox the introduction goes out from (14 Oct): Nicole's, not the campaign
+ * mailbox that emailed the lead.
+ */
+export function handoverVariables(
+  input: Pick<RunAgentInput, "leadName" | "leadEmail" | "leadPhone" | "leadCompany" | "leadTitle" | "subject" | "senderName" | "introSenderName" | "ourEmail">,
+) {
+  return {
+    lead: {
+      name: input.leadName,
+      email: input.leadEmail,
+      phone: input.leadPhone,
+      company: input.leadCompany,
+      title: input.leadTitle,
+    },
+    thread: { subject: input.subject },
+    sender: { name: input.introSenderName ?? input.senderName, email: input.ourEmail },
+  };
+}
+
 export async function runReplyAgentOnInbound(input: RunAgentInput): Promise<RunAgentOutcome> {
   const now = input.now ?? new Date();
 
@@ -311,17 +340,7 @@ export async function runReplyAgentOnInbound(input: RunAgentInput): Promise<RunA
     handoverPlan = planHandover(agent.handover, {
       client: input.introduction.client,
       unavailableReason: input.introduction.unavailableReason,
-      variables: {
-        lead: {
-          name: input.leadName,
-          email: input.leadEmail,
-          phone: input.leadPhone,
-          company: input.leadCompany,
-          title: input.leadTitle,
-        },
-        thread: { subject: input.subject },
-        sender: { name: input.senderName, email: input.ourEmail },
-      },
+      variables: handoverVariables(input),
     });
   }
 
@@ -646,7 +665,7 @@ export async function assembleRunInput(
 
   const { data: thread } = await admin
     .from("threads")
-    .select("id, workspace_id, subject, channel_id, lead_id, client_id, outbound_sender_email, campaign_name")
+    .select("id, workspace_id, subject, channel_id, lead_id, client_id, outbound_sender_email, campaign_name, source_provider")
     .eq("id", threadId)
     .eq("workspace_id", workspaceId)
     .maybeSingle();
@@ -734,6 +753,19 @@ export async function assembleRunInput(
     senderName = ((channel?.display_name as string | null) ?? "").trim() || null;
   }
 
+  /*
+   * The handover is signed by the mailbox it goes out from — Nicole's when
+   * she has a usable one on this platform, the same choice send-transport
+   * makes when it sends. A failed lookup keeps the campaign mailbox's name.
+   */
+  let introSenderName = senderName;
+  try {
+    const sender = await introSenderFor(admin, workspaceId, (thread.source_provider as string | null) ?? "emailbison");
+    introSenderName = introSignOffName(sender, senderName);
+  } catch (err) {
+    console.error("[agent] intro sender lookup failed; a handover is signed with the campaign mailbox's name", err);
+  }
+
   const clientId = (thread.client_id as string | null) ?? null;
   const introduction = await resolveIntroduction(clientId, (thread.campaign_name as string | null) ?? null);
 
@@ -780,6 +812,7 @@ export async function assembleRunInput(
     ourName: null,
     ourEmail: (thread.outbound_sender_email as string | null) ?? null,
     senderName,
+    introSenderName,
     subject: (lastInbound?.subject as string | null) ?? (thread.subject as string | null) ?? null,
     conversation,
     introduction,

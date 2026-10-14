@@ -34,6 +34,7 @@ import { mergeAlwaysCcString } from "@/lib/inbox/auto-cc";
 import { introWasSent } from "@/lib/inbox/intro-send-guard";
 import { fitIntroToLead, introSubject } from "@/lib/inbox/intro-macro";
 import { withOpener } from "@/lib/inbox/intro-opener";
+import { introSignOffName } from "@/lib/inbox/intro-sender";
 import {
   ComposerBodyEditor,
   type ComposerBodyHandle,
@@ -524,6 +525,8 @@ export function Composer({
     if (!introMacro?.available || introducing) return;
     setIntroducing(true);
     try {
+      // The mailbox introductions go out from (Nicole) — see below.
+      const s = introMacro.sender;
       const vars = {
         lead: {
           name: toName ?? null,
@@ -533,7 +536,11 @@ export function Composer({
           title: leadTitle,
         },
         thread: { subject: composerSubject },
-        sender: { name: fromName ?? null, email: fromEmail ?? null },
+        // Signed by whoever it goes out from (14 Oct): Nicole when From
+        // switches to her mailbox, not the campaign mailbox that emailed the lead.
+        sender: s?.channelId
+          ? { name: introSignOffName({ ...s, name: s.name ?? null }, fromName ?? null), email: s.email }
+          : { name: fromName ?? null, email: fromEmail ?? null },
       };
       // A lead with no phone (or brokerage) gets the sentence rewritten, not a
       // blank (6 Oct) — then the same substitution the Templates picker
@@ -561,7 +568,6 @@ export function Composer({
       // Introductions go out from Nicole (Eddy, 5 Oct), not the campaign
       // mailbox that emailed the lead. No usable mailbox on this platform:
       // From is left alone and the reason is shown above Send.
-      const s = introMacro.sender;
       const notes: string[] = [];
       let warn = false;
       if (s?.channelId) {
@@ -1404,7 +1410,13 @@ type IntroMacroState =
       cc: string | null;
       introductionLabelId: string | null;
       /** The mailbox introductions go out from (Nicole), or why there is none here. */
-      sender?: { email: string; channelId: string | null; problem: string | null };
+      sender?: {
+        email: string;
+        channelId: string | null;
+        /** The name on that mailbox, which signs the introduction. Absent from an older server. */
+        name?: string | null;
+        problem: string | null;
+      };
       /** Who this lead goes to when the client's people have territories (6 Oct). */
       route?: { byTerritory: boolean; matched: string[]; fallback: boolean; people: string[]; variant?: string | null };
     }
