@@ -3,6 +3,7 @@ import { createAdminSupabase } from "@/lib/supabase/admin";
 import { fetchAllRows } from "@/lib/db/paginated-select";
 import { env } from "@/lib/env";
 import { loadExternalIntrosByClient } from "@/lib/portals/external-intros";
+import { countIntroductions, type LabelledIntro, type PortalEntryRow } from "./intro-counts";
 
 // Shared "Introduction"-label data layer for the client portals.
 //
@@ -43,6 +44,9 @@ export interface IntroLead {
 export interface IntroSummary {
   count: number;
   lastAt: string | null;
+  /** Of `count`, in the client's portal / made but never in it (intro-counts.ts). Absent when the portal could not be read. */
+  inPortal?: number;
+  notInPortal?: number;
 }
 
 // Resolve the Introduction label id for the BrokerStaffer workspace.
@@ -244,11 +248,42 @@ export async function loadCombinedClientIntroLeads(clientId: string): Promise<In
   return ourByClient.get(clientId) ?? [];
 }
 
+/*
+ * Every portal entry, for the introductions count (15 Oct) — four columns,
+ * paged: there are ~1,850 and a select stops at 1,000 without saying so.
+ * Null when they cannot be read, so the count falls back rather than drops.
+ */
+const loadPortalEntriesForCounts = cache(async (): Promise<PortalEntryRow[] | null> => {
+  try {
+    const admin = createAdminSupabase();
+    return await fetchAllRows<PortalEntryRow>(({ from, to }) =>
+      admin
+        .from("client_pipeline_entries")
+        .select("client_id, thread_id, source, introduced_at")
+        .order("id", { ascending: true })
+        .range(from, to),
+    );
+  } catch (e) {
+    console.error("[intro-leads] portal entries for counts:", e instanceof Error ? e.message : e);
+    return null;
+  }
+});
+
 // Combined per-client roll-up for the admin grid — count + most recent.
-// Same legacy-disconnect as above: only counts Introduction-labeled
-// threads from the new MasterInbox.
+// Since 15 Oct: the client's introductions as intro-counts.ts defines them
+// (our portal entries + labelled conversations missing from the portal), so
+// the grid agrees with each portal and shows what never reached it. The same
+// change as the OS (NextHire-Solutions/OS, intro-counts.ts).
 export async function loadCombinedIntroSummaryByClient(): Promise<Map<string, IntroSummary>> {
-  const ourByClient = await loadOurIntroLeadsByClient();
+  const [ourByClient, entries] = await Promise.all([loadOurIntroLeadsByClient(), loadPortalEntriesForCounts()]);
+  if (entries) {
+    const labelled: LabelledIntro[] = [];
+    for (const [client_id, leads] of ourByClient) {
+      for (const l of leads) labelled.push({ client_id, thread_id: l.thread_id, assigned_at: l.assigned_at });
+    }
+    return countIntroductions(entries, labelled);
+  }
+  // The portal could not be read: the labelled conversations alone, as before 15 Oct.
   const out = new Map<string, IntroSummary>();
   for (const [id, leads] of ourByClient) {
     let lastAt: string | null = null;
