@@ -53,7 +53,8 @@ export default async function PortalsPage() {
         { feature_flags: c.feature_flags as Record<string, unknown> | null },
         TEAM_SMS_FLAG,
       ),
-      intro_count: s?.count ?? 0,
+      // What the portal itself shows, "N of N candidates" (15 Oct: the grid must match the portal).
+      intro_count: s?.candidates ?? s?.count ?? 0,
       last_intro_at: s?.lastAt ?? null,
     };
   });

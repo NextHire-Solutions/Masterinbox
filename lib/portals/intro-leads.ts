@@ -47,6 +47,8 @@ export interface IntroSummary {
   /** Of `count`, in the client's portal / made but never in it (intro-counts.ts). Absent when the portal could not be read. */
   inPortal?: number;
   notInPortal?: number;
+  /** Every candidate in the portal, the client's own too — the portal's own "N of N candidates". */
+  candidates?: number;
 }
 
 // Resolve the Introduction label id for the BrokerStaffer workspace.

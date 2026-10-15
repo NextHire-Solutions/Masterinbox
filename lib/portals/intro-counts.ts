@@ -18,6 +18,13 @@
  * the client's own "Client Entry" candidates), plus every conversation labelled
  * Introduction that has no such entry. A labelled conversation the client had
  * already added themselves is in the portal, so it counts as in the portal.
+ *
+ * WHICH NUMBER IS SHOWN (15 Oct, second pass): the OS must agree with the
+ * portal ("C21, Chucktown and FAST are not showing the same numbers"). So the
+ * headline `count` is the introductions IN the portal; the ones that never
+ * reached it are `notInPortal`, shown beside it, never added in. The Client
+ * Portals list shows `candidates` — exactly the portal's own "N of N
+ * candidates", the client's own included.
  */
 
 /** What a client adds to their own portal. Their candidates, not our introductions. */
@@ -38,12 +45,15 @@ export interface LabelledIntro {
 }
 
 export interface IntroCount {
+  /** The headline: our introductions in the client's portal (= inPortal). */
   count: number;
   lastAt: string | null;
   /** Introductions the client can see in their portal. */
   inPortal: number;
-  /** Introductions made but never in the client's portal (count is inPortal + notInPortal). */
+  /** Introductions made but never in the client's portal — shown beside `count`, not in it. */
   notInPortal: number;
+  /** Every candidate in the portal, the client's own too — the portal's own "N of N candidates". */
+  candidates: number;
 }
 
 const later = (a: string | null, b: string | null) => (!a ? b : !b ? a : a > b ? a : b);
@@ -52,7 +62,7 @@ export function countIntroductions(entries: readonly PortalEntryRow[], labelled:
   const out = new Map<string, IntroCount>();
   const row = (clientId: string) => {
     let r = out.get(clientId);
-    if (!r) out.set(clientId, (r = { count: 0, lastAt: null, inPortal: 0, notInPortal: 0 }));
+    if (!r) out.set(clientId, (r = { count: 0, lastAt: null, inPortal: 0, notInPortal: 0, candidates: 0 }));
     return r;
   };
 
@@ -62,7 +72,9 @@ export function countIntroductions(entries: readonly PortalEntryRow[], labelled:
   const ours = new Set<string>();
 
   for (const e of entries) {
-    if (!e.client_id || e.source === CLIENT_ENTRY_SOURCE) continue;
+    if (!e.client_id) continue;
+    row(e.client_id).candidates += 1;
+    if (e.source === CLIENT_ENTRY_SOURCE) continue;
     if (e.thread_id) ours.add(e.thread_id);
     const r = row(e.client_id);
     r.inPortal += 1;
@@ -80,6 +92,6 @@ export function countIntroductions(entries: readonly PortalEntryRow[], labelled:
     r.lastAt = later(r.lastAt, l.assigned_at);
   }
 
-  for (const r of out.values()) r.count = r.inPortal + r.notInPortal;
+  for (const r of out.values()) r.count = r.inPortal;
   return out;
 }
