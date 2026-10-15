@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
-import { resolvePortalRow } from "@/lib/portals/token";
+import { notFound, redirect } from "next/navigation";
+import { currentTokenFor, resolvePortalRow } from "@/lib/portals/token";
 import { portalBillingHold } from "@/lib/portals/billing-hold";
 import { PortalBillingHold } from "@/components/portals/billing-hold";
 import { loadPortalCounts } from "@/lib/portals/portal-data";
@@ -72,6 +72,11 @@ export default async function PortalTokenLayout(props: {
   const { token } = await props.params;
   const client = await resolvePortalRow(token);
   if (!client) {
+    // An old link of a portal whose URL has changed (0079): forward it to the
+    // portal's current link, so the links a client already has keep working.
+    // To the portal's front page — every link we send is the front page.
+    const current = await currentTokenFor(token);
+    if (current) redirect(`/portal/${encodeURIComponent(current)}`);
     // /portal/[token]/page.tsx renders its own "Portal not found" screen
     // for the root URL. For sub-routes (pipeline/agents/dnc/team) a
     // missing token is a hard 404 — there's no content to render.

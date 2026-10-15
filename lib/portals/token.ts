@@ -2,6 +2,7 @@ import { cache } from "react";
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import { CLIENT_PORTALS_ENABLED } from "@/lib/portals/flag";
 import { portalBillingHold } from "@/lib/portals/billing-hold";
+import { forwardTokenFor } from "@/lib/portals/token-forward";
 
 // Resolves a /portal/<token> token to a client. The token IS the
 // credential — every public portal page and edit API uses this to gate
@@ -145,6 +146,37 @@ export const resolvePortalClient = cache(
     if (!client) return null;
     if (await portalBillingHold(client.id)) return null;
     return client;
+  },
+);
+
+/**
+ * The current link for a portal's OLD link (migration 0079), or null.
+ *
+ * Only asked when a token finds no portal, so an ordinary visit costs nothing
+ * extra. Fails closed to "not found" — exactly today's answer — when the
+ * table is not there yet or anything goes wrong.
+ */
+export const currentTokenFor = cache(
+  async function currentTokenFor(oldToken: string): Promise<string | null> {
+    if (!CLIENT_PORTALS_ENABLED) return null;
+    if (!oldToken || oldToken.length < 4) return null;
+    try {
+      const admin = createAdminSupabase();
+      const { data: alias, error } = await admin
+        .from("portal_token_aliases")
+        .select("client_id")
+        .eq("old_token", oldToken)
+        .maybeSingle();
+      if (error || !alias) return null;
+      const { data: portal } = await admin
+        .from("clients")
+        .select("portal_token, slug, portal_enabled")
+        .eq("id", alias.client_id as string)
+        .maybeSingle();
+      return forwardTokenFor(oldToken, portal as { portal_token: string | null; slug: string | null; portal_enabled: boolean | null } | null);
+    } catch {
+      return null;
+    }
   },
 );
 
